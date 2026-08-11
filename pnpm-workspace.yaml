@@ -1,0 +1,6 @@
+allowBuilds:
+  '@medusajs/telemetry': set this to true or false
+  '@swc/core': set this to true or false
+  esbuild: set this to true or false
+  msgpackr-extract: set this to true or false
+  protobufjs: set this to true or false
