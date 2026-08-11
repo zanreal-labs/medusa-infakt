@@ -459,6 +459,7 @@ Everything runs without a database or network access. What each area covers:
 | `lib/infakt/client.test.ts`              | The API client: auth header, base URLs, response mapping, error shapes, the KSeF-2.0 fallback. |
 | `lib/invoicing/builder.test.ts`          | The payload rules, the total-match guard, and that no rejection reason leaks buyer data.       |
 | `lib/invoicing/money.test.ts`            | Minor-unit conversion, Warsaw calendar dates, strict date validation.                          |
+| `lib/options.test.ts`                    | Every boot failure, and that the public option shape never carries the API key.                |
 | `lib/invoicing/nip.test.ts`              | Normalization, the checksum, the `company`-field heuristic, the extractor's precedence.        |
 | `lib/invoicing/ksef.test.ts`             | Mode decisions, the custom predicate's override, `requireActive` defaults.                     |
 | `lib/invoicing/paid.test.ts`             | The fully-paid gate: partial captures, refunds, canceled collections, float drift.             |
