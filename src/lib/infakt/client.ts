@@ -201,6 +201,13 @@ export class InfaktClient {
 
   constructor(options: InfaktClientOptions) {
     if (!options.apiKey) {
+      // Deliberately a plain Error, not a MedusaError: this module is a
+      // standalone API client with no Medusa imports, so it stays usable (and
+      // testable) outside a Medusa container. The option that feeds this is
+      // already validated at boot by the module loader, so reaching this line at
+      // all means a programming error inside the plugin, not a request Medusa
+      // needs to map to an HTTP status.
+      // eslint-disable-next-line @medusajs/use-medusa-error-not-generic-error
       throw new Error("InfaktClient: apiKey is required.");
     }
     this.apiKey = options.apiKey;
