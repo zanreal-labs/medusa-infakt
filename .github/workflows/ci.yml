@@ -71,7 +71,11 @@ jobs:
           --health-retries 10
 
     steps:
+      # fetch-depth: 0 because the snapshot check below diffs across the pushed
+      # commit range, which a shallow clone cannot see.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -96,15 +100,19 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/medusa_infakt_ci
         run: pnpm exec medusa plugin:db:generate
 
-      # `git status --porcelain` and NOT `git diff`: a newly generated migration is an
-      # UNTRACKED file, which `git diff` does not see at all. Swapping this for
-      # `git diff --quiet` while tidying would leave the job green for the exact case
-      # it exists to catch - a new model with no committed migration.
+      # `git status --porcelain` rather than `git diff`, because a newly generated
+      # migration is UNTRACKED and `git diff` cannot see it.
       #
-      # Rehearsed in both directions against Postgres 16 before this landed, on the
-      # principle that a guard nobody has watched fire is not a guard: adding a column
-      # to a DML model without generating fires it with the exact diff (including the
-      # `??` line for the new migration), and a clean tree leaves it silent.
+      # Being precise about how much that buys, since an earlier version of this
+      # comment overstated it: generating a migration also modifies the tracked
+      # snapshot, so `git diff` would in practice fire too - via the snapshot, not
+      # because it saw the new file. `git status` is still the right tool (it reports
+      # the thing you actually want to know about), but it is not what stands between
+      # this repo and a missing migration.
+      #
+      # Rehearsed in both directions against Postgres 16: adding a column to a DML
+      # model without generating fires this with the exact diff, and a clean tree
+      # leaves it silent. What it does NOT catch is the next step's job.
       - name: Fail if a migration is missing
         run: |
           if [ -n "$(git status --porcelain src/modules)" ]; then
@@ -114,3 +122,70 @@ jobs:
             git diff -- src/modules
             exit 1
           fi
+
+      # The hole the step above cannot see, and the reason there are two guards.
+      #
+      # `plugin:db:generate` diffs the models against the SNAPSHOT, not against the
+      # database. So a commit that carries the updated snapshot but never `git add`ed
+      # the generated `Migration*.ts` is completely silent above: the tree is clean,
+      # the migration file is simply absent, and regenerating reports "No migration
+      # created" because the snapshot already accounts for the schema. The column is
+      # then missing from the table on deploy.
+      #
+      # Forgetting `git add` on a new file is an ordinary mistake, so this checks the
+      # pushed range directly: if the snapshot moved, a migration must have been ADDED
+      # alongside it. `--diff-filter=A` is load-bearing - a modified migration is not
+      # a new one.
+      #
+      # Verified by construction rather than by reasoning (committing snapshot+model
+      # and deleting the migration really does pass the step above), and all six paths
+      # rehearsed: the hole fires, a correct snapshot+migration commit passes, an
+      # unrelated commit skips, and an all-zero base, an empty base and a base absent
+      # after a force push each skip cleanly instead of crashing the job. That last
+      # group matters - a guard that reddens CI on an unrelated force push gets
+      # disabled by the third person it inconveniences.
+      #
+      # Credit: medusa-marken found this one.
+      - name: Fail if the snapshot moved without a new migration
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BASE_SHA:-}" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "No usable base commit (new branch, or a manual run) - skipping."
+            exit 0
+          fi
+          if ! git rev-parse --verify --quiet "${BASE_SHA}^{commit}" >/dev/null; then
+            echo "Base commit $BASE_SHA is not in this repository (likely a force push) - skipping."
+            exit 0
+          fi
+
+          snapshot_changed=$(git diff --name-only "$BASE_SHA" HEAD -- src/modules \
+            | { grep -E '/\.snapshot-.*\.json$' || true; })
+          if [ -z "$snapshot_changed" ]; then
+            echo "The migration snapshot did not change in this range - nothing to check."
+            exit 0
+          fi
+
+          migration_added=$(git diff --name-only --diff-filter=A "$BASE_SHA" HEAD -- src/modules \
+            | { grep -E '/Migration[0-9]+\.ts$' || true; })
+          if [ -n "$migration_added" ]; then
+            echo "Snapshot moved and a migration was added:"
+            echo "$migration_added" | sed 's/^/  /'
+            exit 0
+          fi
+
+          echo "The migration snapshot changed but NO migration file was added in this range."
+          echo
+          echo "This is almost always a forgotten 'git add' on a newly generated migration."
+          echo "It is invisible to the regenerate-and-check step above, because"
+          echo "plugin:db:generate diffs the models against the SNAPSHOT, not the database:"
+          echo "once the updated snapshot is committed, regenerating reports 'No migration"
+          echo "created' and the tree stays clean. The column would be missing on deploy."
+          echo
+          echo "Fix: commit the generated Migration*.ts alongside the snapshot."
+          echo
+          echo "Snapshot files changed in this range:"
+          echo "$snapshot_changed" | sed 's/^/  /'
+          exit 1
