@@ -1,6 +1,9 @@
+# pnpm 11 asks about every dependency with a postinstall script. These are the
+# ones the Medusa toolchain pulls in; `@medusajs/telemetry` is denied because a
+# plugin build has no reason to phone home from CI.
 allowBuilds:
-  '@medusajs/telemetry': set this to true or false
-  '@swc/core': set this to true or false
-  esbuild: set this to true or false
-  msgpackr-extract: set this to true or false
-  protobufjs: set this to true or false
+  "@medusajs/telemetry": false
+  "@swc/core": true
+  esbuild: true
+  msgpackr-extract: true
+  protobufjs: true
