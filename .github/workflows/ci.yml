@@ -96,6 +96,15 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/medusa_infakt_ci
         run: pnpm exec medusa plugin:db:generate
 
+      # `git status --porcelain` and NOT `git diff`: a newly generated migration is an
+      # UNTRACKED file, which `git diff` does not see at all. Swapping this for
+      # `git diff --quiet` while tidying would leave the job green for the exact case
+      # it exists to catch - a new model with no committed migration.
+      #
+      # Rehearsed in both directions against Postgres 16 before this landed, on the
+      # principle that a guard nobody has watched fire is not a guard: adding a column
+      # to a DML model without generating fires it with the exact diff (including the
+      # `??` line for the new migration), and a clean tree leaves it silent.
       - name: Fail if a migration is missing
         run: |
           if [ -n "$(git status --porcelain src/modules)" ]; then
