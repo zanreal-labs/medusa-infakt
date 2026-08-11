@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm exec medusa lint src
+
+      - name: Typecheck (backend)
+        run: pnpm exec tsc --noEmit -p tsconfig.json
+
+      # The admin bundle compiles against its own tsconfig with different lib and
+      # module settings, so a component that type-checks under the backend config can
+      # still be broken here.
+      - name: Typecheck (admin)
+        run: pnpm exec tsc --noEmit -p src/admin/tsconfig.json
+
+      - name: Test
+        run: pnpm exec vitest run
+
+      # Compiles src to .medusa/server and bundles the admin extension. This is the
+      # step that catches a broken export map, or an admin route that only
+      # type-checks in isolation.
+      - name: Build
+        run: pnpm exec medusa plugin:build
+
+  migrations-up-to-date:
+    name: Migrations match the models
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: medusa_infakt_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # A model change without a regenerated migration is invisible until someone
+      # deploys and the table is missing a column. Generating here and failing on a
+      # dirty tree makes that a review-time error instead.
+      - name: Generate migrations
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_USERNAME: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: medusa_infakt_ci
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/medusa_infakt_ci
+        run: pnpm exec medusa plugin:db:generate
+
+      - name: Fail if a migration is missing
+        run: |
+          if [ -n "$(git status --porcelain src/modules)" ]; then
+            echo "Models changed without a regenerated migration."
+            echo "Run 'pnpm exec medusa plugin:db:generate' and commit the result."
+            git status --porcelain src/modules
+            git diff -- src/modules
+            exit 1
+          fi
