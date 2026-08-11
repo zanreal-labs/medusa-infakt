@@ -489,16 +489,38 @@ Requires a local Postgres. Always generate rather than hand-writing, so
 `.snapshot-medusa-infakt.json` stays authoritative. CI enforces this: it regenerates
 against a throwaway Postgres and fails on a dirty tree.
 
+**Use this exact container name and port.** They are recorded here so the next person
+reuses them rather than hunting for a free port - two people independently picking "the
+next free port" is how one of them ends up deleting the other's container.
+
 ```bash
-# .env (not committed; see .env.template)
+# 1. A throwaway Postgres, named after this repo, on this repo's port.
+docker run -d --name infakt-migrate-pg \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=medusa_infakt_dev \
+  -p 55433:5432 postgres:16-alpine
+
+# 2. .env (not committed; see .env.template)
+cat > .env <<'ENV'
 DB_USERNAME=postgres
 DB_PASSWORD=postgres
 DB_HOST=localhost
-DB_PORT=5432
+DB_PORT=55433
 DB_NAME=medusa_infakt_dev
+DATABASE_URL=postgres://postgres:postgres@localhost:55433/medusa_infakt_dev
+ENV
 
+# 3. Generate, then commit BOTH the migration and the updated snapshot.
 pnpm exec medusa plugin:db:generate
+
+# 4. Tear down in the same sitting, BY NAME. Never by `--filter publish=<port>`:
+#    that matches whatever else happens to be on the port, including another
+#    repo's container.
+docker rm -f infakt-migrate-pg && rm -f .env
 ```
+
+Create and destroy it within the same task, so it never outlives the migration it was
+for.
 
 ## Roadmap
 
