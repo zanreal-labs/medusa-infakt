@@ -71,6 +71,11 @@ export interface InvoiceStateRow {
   attempts: number;
   /** Earliest time the worker may pick the row up again. */
   next_attempt_at?: Date | string | null;
+  /** Last failure, truncated and PII-free. Rendered in the admin UI. */
+  last_error?: string | null;
+  skip_reason?: string | null;
+  completed_at?: Date | string | null;
+  adopted_at?: Date | string | null;
 }
 
 /**
