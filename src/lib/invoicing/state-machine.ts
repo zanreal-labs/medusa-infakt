@@ -57,6 +57,8 @@ export type InvoiceStatus = "pending" | "processing" | "done" | "skipped" | "nee
 /** The persisted row, as the pure rules need to see it. */
 export interface InvoiceStateRow {
   status: InvoiceStatus;
+  is_company?: boolean | null;
+  ksef_decision_reason?: string | null;
   submit_started_at?: Date | string | null;
   task_reference?: string | null;
   invoice_uuid?: string | null;
@@ -67,6 +69,8 @@ export interface InvoiceStateRow {
   ksef_number?: string | null;
   event_emitted_at?: Date | string | null;
   attempts: number;
+  /** Earliest time the worker may pick the row up again. */
+  next_attempt_at?: Date | string | null;
 }
 
 /**
