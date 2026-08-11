@@ -26,6 +26,13 @@ export const STALE_CLAIM_MS = 10 * 60 * 1000;
 export const RUN_STATE_SINGLETON_KEY = "singleton";
 
 /**
+ * Physical table behind InfaktInvoiceModel. Named here for the same reason as the
+ * run-state table: the due-row query is raw SQL. Must match
+ * `model.define("infakt_invoice", ...)`.
+ */
+const INVOICE_TABLE = "infakt_invoice";
+
+/**
  * Physical table behind InfaktRunStateModel. Named here because the atomic
  * claim/release statements are raw SQL - the generated CRUD methods cannot express
  * a conditional UPDATE (see `claimRun`). Must match
@@ -282,6 +289,44 @@ export default class InfaktModuleService extends MedusaService({
     );
 
     return released.length > 0;
+  }
+
+  /**
+   * The rows the worker should advance now: pending or processing, whose
+   * `next_attempt_at` has passed or was never set, oldest first.
+   *
+   * Raw SQL because the predicate has to run in the DATABASE. Fetching a padded page
+   * and filtering in JS - the obvious version - lets a backlog starve the queue: a
+   * store with more deferred rows than the page size (orders awaiting payment, each
+   * re-checked every 30 minutes) can fill every page with rows that are not due, and
+   * a genuinely due row behind them is never reached. That is not a slowdown; it is
+   * an invoice that never gets issued.
+   *
+   * `done`, `skipped` and `needs_review` are terminal and are never picked up here.
+   * Getting a needs_review row moving again is an explicit operator action, which is
+   * the entire point of that state.
+   *
+   * The `(status, next_attempt_at)` index on the model covers the filter. Postgres
+   * chooses a sequential scan on a small table regardless, which is correct - the
+   * index earns its keep once the ledger is large.
+   *
+   * Verified against Postgres 16 with the real migration applied: it returns exactly
+   * the pending/processing rows that are due, excludes future-dated, needs_review,
+   * done, skipped and soft-deleted rows, and still returns a due row sitting behind
+   * 500 not-due ones.
+   */
+  async listDueInvoices(limit: number): Promise<Record<string, unknown>[]> {
+    return rawRows<Record<string, unknown>>(
+      await this.getRawSql().raw(
+        `select * from "${INVOICE_TABLE}"
+          where "deleted_at" is null
+            and "status" in ('pending', 'processing')
+            and ("next_attempt_at" is null or "next_attempt_at" <= ?)
+          order by "created_at" asc
+          limit ?`,
+        [new Date(), limit],
+      ),
+    );
   }
 
   /**

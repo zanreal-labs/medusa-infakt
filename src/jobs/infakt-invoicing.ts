@@ -175,7 +175,7 @@ async function drainDueRows(
   logger: Logger,
 ): Promise<InvoicingRunSummary> {
   const summary = emptySummary();
-  const rows = await listDueRows(infakt);
+  const rows = (await infakt.listDueInvoices(BATCH_LIMIT)) as unknown as InvoiceRow[];
   const deps = buildDeps(container, infakt, logger);
 
   for (const row of rows) {
@@ -190,25 +190,6 @@ async function drainDueRows(
     }
   }
   return summary;
-}
-
-/**
- * Rows due for work: pending or processing, whose `next_attempt_at` has passed (or
- * was never set), oldest first.
- *
- * `done`, `skipped` and `needs_review` are terminal and are never picked up again
- * by the worker. Getting a needs_review row moving again is an explicit operator
- * action through the admin UI, which is the entire point of that state.
- */
-async function listDueRows(infakt: InfaktModuleService): Promise<InvoiceRow[]> {
-  const rows = (await infakt.listInfaktInvoices(
-    { status: ["pending", "processing"] },
-    { order: { created_at: "ASC" }, take: BATCH_LIMIT * 4 },
-  )) as unknown as InvoiceRow[];
-  const now = Date.now();
-  return rows
-    .filter((row) => !row.next_attempt_at || new Date(row.next_attempt_at).getTime() <= now)
-    .slice(0, BATCH_LIMIT);
 }
 
 function buildDeps(

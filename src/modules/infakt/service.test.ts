@@ -342,6 +342,41 @@ describe("releaseRun", () => {
   });
 });
 
+describe("listDueInvoices", () => {
+  it("filters in the DATABASE, not in JS", async () => {
+    // The JS-filter version let a backlog starve the queue: enough deferred rows
+    // (orders awaiting payment) fill every page, and a genuinely due row behind them
+    // is never reached. That is an invoice that never gets issued, not a slowdown.
+    const { rawCalls, service } = buildService({ rawResult: () => ({ rows: [{ id: "inv_1" }] }) });
+    const rows = await service.listDueInvoices(20);
+
+    expect(rows).toEqual([{ id: "inv_1" }]);
+    const [{ bindings, sql }] = rawCalls;
+    expect(sql).toContain(`"status" in ('pending', 'processing')`);
+    expect(sql).toContain(`"next_attempt_at" is null or "next_attempt_at" <= ?`);
+    expect(sql).toContain(`"deleted_at" is null`);
+    expect(sql).toContain("order by \"created_at\" asc");
+    expect(sql).toContain("limit ?");
+    expect(bindings[0]).toBeInstanceOf(Date);
+    expect(bindings[1]).toBe(20);
+  });
+
+  it("never selects a terminal status", async () => {
+    // done, skipped and needs_review are terminal. Getting a needs_review row moving
+    // again is an explicit operator action, which is the point of that state.
+    const { rawCalls, service } = buildService();
+    await service.listDueInvoices(20);
+    for (const terminal of ["done", "skipped", "needs_review"]) {
+      expect(rawCalls[0].sql).not.toContain(`'${terminal}'`);
+    }
+  });
+
+  it("normalizes a bare-array driver result", async () => {
+    const { service } = buildService({ rawResult: () => [{ id: "inv_1" }] });
+    await expect(service.listDueInvoices(20)).resolves.toEqual([{ id: "inv_1" }]);
+  });
+});
+
 describe("enqueueOrder", () => {
   it("creates a pending row for a new order", async () => {
     const { invoices, service } = buildService();
