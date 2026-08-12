@@ -69,3 +69,20 @@ export interface InvoiceListResponse {
   limit: number;
   offset: number;
 }
+
+export type EnablementReason = "env_force_disabled" | "no_api_key" | "paused" | "active";
+
+/**
+ * The live picture behind the plugin's runtime enable switch, from
+ * `GET /admin/infakt/settings`. Distinct from `InfaktConfig.disabled` (which is
+ * fixed at boot, from `apiKey` alone): `invoicing_paused` and
+ * `env_force_disabled` can both change without a restart, so this is fetched
+ * fresh rather than derived from `InfaktConfig`.
+ */
+export interface InfaktSettings {
+  invoicing_paused: boolean;
+  env_force_disabled: boolean;
+  api_key_configured: boolean;
+  effective_enabled: boolean;
+  reason: EnablementReason;
+}

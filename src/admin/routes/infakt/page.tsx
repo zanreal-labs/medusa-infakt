@@ -18,6 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 import { sdk } from "../../lib/sdk";
 import type {
   InfaktInvoiceRow,
+  InfaktSettings,
   InvoiceListResponse,
   InvoiceStatus,
   OverviewResponse,
@@ -80,22 +81,29 @@ const errorMessage = (error: unknown, fallback: string): string => {
 
 const InfaktPage = () => {
   const [overview, setOverview] = useState<OverviewResponse | undefined>();
+  const [settings, setSettings] = useState<InfaktSettings | undefined>();
   const [rows, setRows] = useState<InfaktInvoiceRow[]>([]);
   const [status, setStatus] = useState<string>("needs_review");
   const [loadError, setLoadError] = useState<string | undefined>();
   const [notice, setNotice] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
+  // Three independent GETs, none of which ever throws on a disabled, unconfigured
+  // or empty plugin - every one of them answers 200 with a payload that says so,
+  // rather than the page having to guess from a caught error why the screen is
+  // blank. A genuinely failed fetch (network, auth) still lands in `loadError`.
   const load = useCallback(async () => {
     try {
-      const [overviewResponse, listResponse] = await Promise.all([
+      const [overviewResponse, listResponse, settingsResponse] = await Promise.all([
         sdk.client.fetch<OverviewResponse>("/admin/infakt"),
         sdk.client.fetch<InvoiceListResponse>("/admin/infakt/invoices", {
           query: status ? { status } : {},
         }),
+        sdk.client.fetch<InfaktSettings>("/admin/infakt/settings"),
       ]);
       setOverview(overviewResponse);
       setRows(listResponse.invoices);
+      setSettings(settingsResponse);
       setLoadError(undefined);
     } catch (error) {
       setLoadError(errorMessage(error, "Failed to load invoicing state."));
@@ -105,6 +113,25 @@ const InfaktPage = () => {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const togglePause = async () => {
+    if (!settings) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await sdk.client.fetch<InfaktSettings>("/admin/infakt/settings", {
+        body: { invoicing_paused: !settings.invoicing_paused },
+        method: "POST",
+      });
+      setSettings(result);
+      setNotice(result.invoicing_paused ? "Invoicing paused." : "Invoicing resumed.");
+    } catch (error) {
+      setLoadError(errorMessage(error, "Could not change the pause switch."));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const act = async (id: string, body: Record<string, unknown>) => {
     setBusy(true);
@@ -170,14 +197,7 @@ const InfaktPage = () => {
         </div>
       </div>
 
-      {config?.disabled ? (
-        <div className="px-6 py-4">
-          <Alert variant="warning">
-            Invoicing is <strong>disabled</strong>: the plugin's <code>apiKey</code> option is not
-            configured. No order will be invoiced until it is set.
-          </Alert>
-        </div>
-      ) : null}
+      <EnablementPanel busy={busy} onTogglePause={() => void togglePause()} settings={settings} />
 
       {runState?.ksef_active === false && config?.ksefMode !== "never" ? (
         <div className="px-6 py-4">
@@ -232,8 +252,11 @@ const InfaktPage = () => {
             {config?.ksefCustomPredicate ? " (custom predicate)" : ""}
           </Field>
           <Field label="Invoicing from">{config?.startDate ?? "no date floor"}</Field>
+          <Field label="Invoicing switch">
+            {settings ? (settings.invoicing_paused ? "paused" : "active") : "-"}
+          </Field>
         </dl>
-        <div className="mt-4">
+        <div className="mt-4 flex flex-wrap gap-x-2 gap-y-2">
           <Button
             disabled={busy}
             onClick={() => void recheckKsef()}
@@ -242,6 +265,16 @@ const InfaktPage = () => {
           >
             Re-check KSeF integration
           </Button>
+          {settings && !settings.env_force_disabled && settings.api_key_configured ? (
+            <Button
+              disabled={busy}
+              onClick={() => void togglePause()}
+              size="small"
+              variant="secondary"
+            >
+              {settings.invoicing_paused ? "Resume invoicing" : "Pause invoicing"}
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -520,6 +553,66 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
     <dd className="txt-compact-small">{children}</dd>
   </div>
 );
+
+/**
+ * The one banner for every reason invoicing can be off, in the same precedence
+ * the backend applies: an environment force-off outranks a missing `apiKey`,
+ * which outranks the admin pause switch. Renders nothing at all once `settings`
+ * loads and invoicing is active - and nothing before it loads, rather than a
+ * placeholder guess about a state the page has not confirmed yet.
+ */
+const EnablementPanel = ({
+  settings,
+  busy,
+  onTogglePause,
+}: {
+  settings: InfaktSettings | undefined;
+  busy: boolean;
+  onTogglePause: () => void;
+}) => {
+  if (!settings || settings.reason === "active") {
+    return null;
+  }
+
+  if (settings.reason === "env_force_disabled") {
+    return (
+      <div className="px-6 py-4">
+        <Alert variant="error">
+          Invoicing is <strong>forced off</strong> by the <code>INFAKT_INVOICING_DISABLED</code>{" "}
+          environment variable. This overrides the pause switch below and cannot be changed from
+          here - unset the variable and redeploy to bring invoicing back under the switch's control.
+        </Alert>
+      </div>
+    );
+  }
+
+  if (settings.reason === "no_api_key") {
+    return (
+      <div className="px-6 py-4">
+        <Alert variant="warning">
+          Invoicing is <strong>disabled</strong>: the plugin's <code>apiKey</code> option is not
+          configured. No order will be invoiced until it is set.
+        </Alert>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-6 py-4">
+      <Alert variant="warning">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <span>
+            Invoicing is <strong>paused</strong>. No order will be invoiced until an operator
+            resumes it.
+          </span>
+          <Button disabled={busy} onClick={onTogglePause} size="small" variant="secondary">
+            Resume invoicing
+          </Button>
+        </div>
+      </Alert>
+    </div>
+  );
+};
 
 export const config = defineRouteConfig({
   icon: DocumentText,

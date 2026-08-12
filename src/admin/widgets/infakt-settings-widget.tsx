@@ -1,47 +1,77 @@
 import { defineWidgetConfig } from "@medusajs/admin-sdk";
-import { Alert, Badge, Container, Heading, StatusBadge, Text } from "@medusajs/ui";
-import { useEffect, useState } from "react";
+import { Alert, Badge, Button, Container, Heading, StatusBadge, Text } from "@medusajs/ui";
+import { useCallback, useEffect, useState } from "react";
 import { sdk } from "../lib/sdk";
-import type { OverviewResponse } from "../lib/types";
+import type { InfaktSettings, OverviewResponse } from "../lib/types";
 
 /**
- * A read-only summary of how invoicing is configured, on the store settings page.
+ * A summary of how invoicing is configured, on the store settings page - and,
+ * per the plugin's runtime pause switch, the one place besides the Invoicing
+ * page where an operator can flip it.
  *
- * It exists because the two things that quietly stop invoices from being issued -
- * an unset `apiKey` and a lapsed KSeF integration - are invisible everywhere else
- * in the dashboard. Both are reported here in the words an operator needs, next to
- * the rest of the store's configuration, rather than only on a page someone has to
- * think to open.
+ * It exists because the things that quietly stop invoices from being issued - an
+ * unset `apiKey`, the pause switch, the `INFAKT_INVOICING_DISABLED` environment
+ * override, and a lapsed KSeF integration - are invisible everywhere else in the
+ * dashboard. All four are reported here in the words an operator needs, next to
+ * the rest of the store's configuration, rather than only on a page someone has
+ * to think to open.
  *
- * No secret material is rendered: the route filters the configuration through
- * `toPublicInfaktOptions`, which does not carry the API key.
+ * Both requests answer 200 with a payload that says so in every state, including
+ * fully disabled or unconfigured - neither one ever throws into this widget.
+ *
+ * No secret material is rendered: the overview route filters the configuration
+ * through `toPublicInfaktOptions`, which does not carry the API key.
  */
 const InfaktSettingsWidget = () => {
   const [data, setData] = useState<OverviewResponse | undefined>();
+  const [settings, setSettings] = useState<InfaktSettings | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [overviewResponse, settingsResponse] = await Promise.all([
+        sdk.client.fetch<OverviewResponse>("/admin/infakt"),
+        sdk.client.fetch<InfaktSettings>("/admin/infakt/settings"),
+      ]);
+      setData(overviewResponse);
+      setSettings(settingsResponse);
+      setError(undefined);
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error ? loadError.message : "Could not load the inFakt settings.",
+      );
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    sdk.client
-      .fetch<OverviewResponse>("/admin/infakt")
-      .then((response) => {
-        if (!cancelled) {
-          setData(response);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setError(error instanceof Error ? error.message : "Could not load the inFakt settings.");
-        }
+    void load();
+  }, [load]);
+
+  const togglePause = async () => {
+    if (!settings) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await sdk.client.fetch<InfaktSettings>("/admin/infakt/settings", {
+        body: { invoicing_paused: !settings.invoicing_paused },
+        method: "POST",
       });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+      setSettings(result);
+    } catch (toggleError) {
+      setError(
+        toggleError instanceof Error ? toggleError.message : "Could not change the pause switch.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const config = data?.config;
   const runState = data?.run_state;
   const ksefUnhealthy = runState?.ksef_active === false && config?.ksefMode !== "never";
+  const active = settings?.reason === "active";
 
   return (
     <Container className="divide-y p-0">
@@ -57,8 +87,8 @@ const InfaktSettingsWidget = () => {
             <Badge color={config.environment === "sandbox" ? "orange" : "grey"} size="small">
               {config.environment}
             </Badge>
-            <StatusBadge color={config.disabled ? "red" : (ksefUnhealthy ? "orange" : "green")}>
-              {config.disabled ? "disabled" : (ksefUnhealthy ? "needs attention" : "active")}
+            <StatusBadge color={active ? (ksefUnhealthy ? "orange" : "green") : "red"}>
+              {active ? (ksefUnhealthy ? "needs attention" : "active") : (settings?.reason ?? "-")}
             </StatusBadge>
           </div>
         ) : null}
@@ -70,10 +100,17 @@ const InfaktSettingsWidget = () => {
         </div>
       ) : null}
 
-      {config?.disabled ? (
+      {settings && !active ? (
         <div className="px-6 py-4">
           <Alert variant="warning">
-            No order will be invoiced: the plugin's <code>apiKey</code> option is not configured.
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+              <span>{describeReason(settings)}</span>
+              {settings.reason === "paused" ? (
+                <Button disabled={busy} onClick={() => void togglePause()} size="small">
+                  Resume invoicing
+                </Button>
+              ) : null}
+            </div>
           </Alert>
         </div>
       ) : null}
@@ -104,11 +141,40 @@ const InfaktSettingsWidget = () => {
             </Field>
             <Field label="Needs review">{data?.counts.needs_review ?? 0}</Field>
             <Field label="Issued">{data?.counts.done ?? 0}</Field>
+            {settings && !settings.env_force_disabled && settings.api_key_configured ? (
+              <Field label="Pause switch">
+                <Button
+                  disabled={busy}
+                  onClick={() => void togglePause()}
+                  size="small"
+                  variant="secondary"
+                >
+                  {settings.invoicing_paused ? "Resume invoicing" : "Pause invoicing"}
+                </Button>
+              </Field>
+            ) : null}
           </dl>
         </div>
       ) : null}
     </Container>
   );
+};
+
+const describeReason = (settings: InfaktSettings): string => {
+  switch (settings.reason) {
+    case "env_force_disabled": {
+      return "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.";
+    }
+    case "no_api_key": {
+      return "No order will be invoiced: the plugin's apiKey option is not configured.";
+    }
+    case "paused": {
+      return "Invoicing is paused. No order will be invoiced until an operator resumes it.";
+    }
+    default: {
+      return "Invoicing is currently off.";
+    }
+  }
 };
 
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
