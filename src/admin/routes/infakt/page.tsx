@@ -173,10 +173,8 @@ const InfaktPage = () => {
       {config?.disabled ? (
         <div className="px-6 py-4">
           <Alert variant="warning">
-            Invoicing is <strong>disabled</strong>: the plugin's <code>startDate</code> option is
-            missing or is not a <code>YYYY-MM-DD</code> date. No order will be invoiced until it is
-            set. This is the safe default - without a floor, installing this plugin on an existing
-            store would issue a real invoice for every historical order.
+            Invoicing is <strong>disabled</strong>: the plugin's <code>apiKey</code> option is not
+            configured. No order will be invoiced until it is set.
           </Alert>
         </div>
       ) : null}
@@ -233,7 +231,7 @@ const InfaktPage = () => {
             {config?.ksefMode ?? "-"}
             {config?.ksefCustomPredicate ? " (custom predicate)" : ""}
           </Field>
-          <Field label="Invoicing from">{config?.startDate ?? "not set"}</Field>
+          <Field label="Invoicing from">{config?.startDate ?? "no date floor"}</Field>
         </dl>
         <div className="mt-4">
           <Button

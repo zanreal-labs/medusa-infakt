@@ -16,7 +16,7 @@ export interface InfaktConfig {
   ksefRequireActive: boolean;
   ksefCustomPredicate: boolean;
   emitIssuedEvent: boolean;
-  /** True when the pipeline is inert because `startDate` is missing or invalid. */
+  /** True when the plugin is inert because no `apiKey` is configured. */
   disabled: boolean;
 }
 

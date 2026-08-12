@@ -7,8 +7,8 @@ import type { OverviewResponse } from "../lib/types";
 /**
  * A read-only summary of how invoicing is configured, on the store settings page.
  *
- * It exists because the two settings that quietly stop invoices from being issued -
- * an unset `startDate` and a lapsed KSeF integration - are invisible everywhere else
+ * It exists because the two things that quietly stop invoices from being issued -
+ * an unset `apiKey` and a lapsed KSeF integration - are invisible everywhere else
  * in the dashboard. Both are reported here in the words an operator needs, next to
  * the rest of the store's configuration, rather than only on a page someone has to
  * think to open.
@@ -73,8 +73,7 @@ const InfaktSettingsWidget = () => {
       {config?.disabled ? (
         <div className="px-6 py-4">
           <Alert variant="warning">
-            No order will be invoiced: the plugin's <code>startDate</code> option is missing or is
-            not a <code>YYYY-MM-DD</code> date.
+            No order will be invoiced: the plugin's <code>apiKey</code> option is not configured.
           </Alert>
         </div>
       ) : null}
@@ -91,7 +90,7 @@ const InfaktSettingsWidget = () => {
       {config ? (
         <div className="px-6 py-4">
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
-            <Field label="Invoicing orders from">{config.startDate ?? "not set"}</Field>
+            <Field label="Invoicing orders from">{config.startDate ?? "no date floor"}</Field>
             <Field label="Currency">{config.currency}</Field>
             <Field label="VAT rate symbol">{config.taxSymbol}</Field>
             <Field label="Triggered by">{config.triggerEvent}</Field>
