@@ -91,4 +91,31 @@ describe("GET /admin/infakt", () => {
     await GET(request(service([{ attempts: 0, id: "a", status: "something_new" }])), res);
     expect(res.json.mock.calls[0][0].counts.done).toBe(0);
   });
+
+  it("answers 200 with a disabled, empty-counts payload when the plugin has no apiKey - never a 500", async () => {
+    // This route touches only listInfaktInvoices, getRunState and publicOptions -
+    // never apiClient - so a disabled plugin is exactly as safe to render as an
+    // enabled one with zero rows.
+    const disabled = {
+      getRunState: vi.fn().mockResolvedValue({ id: "singleton", status: "idle" }),
+      listInfaktInvoices: vi.fn().mockResolvedValue([]),
+      publicOptions: {
+        currency: "PLN",
+        disabled: true,
+        environment: "production",
+        ksefMode: "nip-only",
+        startDate: null,
+      },
+    };
+    const res = mockResponse();
+    await GET(request(disabled), res);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({ disabled: true }),
+        counts: { done: 0, needs_review: 0, pending: 0, processing: 0, skipped: 0 },
+        crash_window_count: 0,
+      }),
+    );
+  });
 });

@@ -44,6 +44,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     );
   }
 
+  // Adopt is the one action here that touches `apiClient`. Guard on `enabled`
+  // before it, rather than letting the getter's throw reach this handler as an
+  // uncaught error - refused-with-a-reason is the same shape every other
+  // impossible action on this route already answers with.
+  if (action === "adopt" && !infakt.resolvedOptions.enabled) {
+    res.status(409).json({
+      error: "the plugin is disabled (no `apiKey` configured) - there is no inFakt to adopt from",
+      id,
+    });
+    return;
+  }
+
   // For an adopt, confirm the invoice exists in inFakt BEFORE the link is written,
   // and carry its number over. Linking a uuid that does not exist would leave the
   // row looking complete with no document behind it.

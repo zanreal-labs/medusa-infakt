@@ -14,7 +14,7 @@ vi.mock("../../../../../workflows/apply-invoice-action", () => ({
 const service = (overrides: Record<string, unknown> = {}) => ({
   apiClient: { getInvoice: vi.fn().mockResolvedValue({ number: "7/07/2026", uuid: "u-9" }) },
   listInfaktInvoices: vi.fn().mockResolvedValue([{ id: "inv_1", status: "processing" }]),
-  resolvedOptions: { emitIssuedEvent: true },
+  resolvedOptions: { emitIssuedEvent: true, enabled: true },
   ...overrides,
 });
 
@@ -126,6 +126,26 @@ describe("POST /admin/infakt/invoices/:id", () => {
   it("forwards a skip reason", async () => {
     await POST(request(service(), { action: "skip", reason: "test order" }), mockResponse());
     expect(run.mock.calls[0][0].input.reason).toBe("test order");
+  });
+
+  it("refuses to adopt when the plugin is disabled, with a 409 rather than a thrown error", async () => {
+    // apiClient throws when the plugin is disabled; this route must catch that
+    // before the getter is ever touched, not let it become an uncaught error.
+    const svc = service({ resolvedOptions: { emitIssuedEvent: true, enabled: false } });
+    const res = mockResponse();
+    await POST(request(svc, { action: "adopt", invoice_uuid: "u-9" }), res);
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      error: expect.stringContaining("plugin is disabled"),
+      id: "inv_1",
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("still allows retry, clear and skip when the plugin is disabled - only adopt touches inFakt", async () => {
+    const svc = service({ resolvedOptions: { emitIssuedEvent: true, enabled: false } });
+    await POST(request(svc, { action: "retry" }), mockResponse());
+    expect(run).toHaveBeenCalled();
   });
 
   it("does not read inFakt for any action other than adopt", async () => {

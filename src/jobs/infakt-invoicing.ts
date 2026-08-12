@@ -66,11 +66,14 @@ const emptySummary = (): InvoicingRunSummary => ({
 export default async function infaktInvoicingJob(container: MedusaContainer): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
   const infakt = container.resolve<InfaktModuleService>(INFAKT_MODULE);
-  const options = infakt.resolvedOptions;
 
-  if (!options.enabled) {
-    // The loader already reported this at boot. Logging it every five minutes
-    // would bury everything else.
+  // Checked fresh every tick, not just at boot: unlike `apiKey`, both the pause
+  // switch and the environment force-off can change without a restart. Silent
+  // rather than logged - "no apiKey" already had its one boot-time log, and
+  // "paused"/"force-disabled" are runtime states an admin can see live on the
+  // Invoicing page, not failures worth repeating every five minutes.
+  const enablement = await infakt.getEffectiveEnablement();
+  if (!enablement.effectiveEnabled) {
     return;
   }
 

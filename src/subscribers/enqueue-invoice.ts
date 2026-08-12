@@ -24,6 +24,12 @@ import type InfaktModuleService from "../modules/infakt/service";
  *  - Whether the currency is invoiceable.
  *  - Whether it should be filed to KSeF.
  *
+ * This handler DOES make one enablement check of its own - whether invoicing is
+ * effectively on at all (`apiKey` configured, not paused, not force-disabled by
+ * the environment) - because there is no point creating a row the worker will
+ * never pick up. That is a read of runtime state, not a business decision about
+ * this particular order, so it stays here rather than moving into the worker.
+ *
  * A duplicate event is harmless: `order_id` is unique, so `enqueueOrder` is a
  * no-op the second time. A missed event is recoverable: an operator can enqueue
  * the order from the admin UI.
@@ -47,8 +53,13 @@ export default async function enqueueInvoiceSubscriber({
   if (event.name !== options.triggerEvent) {
     return;
   }
-  if (!options.enabled) {
-    // The loader already said this loudly at boot; do not repeat it per order.
+
+  const enablement = await infakt.getEffectiveEnablement();
+  if (!enablement.effectiveEnabled) {
+    // No boot-time log covers "paused" or "force-disabled by the environment" -
+    // both are runtime toggles, not boot-time facts - so this is deliberately
+    // silent per event rather than noisy every time an order is placed. The
+    // admin's Invoicing page is the place to see the current state.
     return;
   }
 

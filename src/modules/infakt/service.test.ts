@@ -1,7 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveInfaktOptions } from "../../lib/options";
 import type { InfaktPluginOptions } from "../../lib/options";
-import InfaktModuleService, { RUN_STATE_SINGLETON_KEY, STALE_CLAIM_MS } from "./service";
+import InfaktModuleService, {
+  RUN_STATE_SINGLETON_KEY,
+  SETTINGS_SINGLETON_KEY,
+  STALE_CLAIM_MS,
+} from "./service";
 
 /**
  * Unit tests, not module-integration tests.
@@ -90,12 +94,14 @@ const buildService = (config?: {
   options?: Partial<InfaktPluginOptions>;
   invoices?: FakeRow[];
   runState?: FakeRow[];
+  settings?: FakeRow[];
   /** Rows the fake conditional UPDATE returns; defaults to one (claim taken). */
   rawResult?: () => unknown;
   client?: Record<string, unknown>;
 }) => {
   const invoices = fakeTable(config?.invoices);
   const runState = fakeTable(config?.runState);
+  const settings = fakeTable(config?.settings);
   const rawCalls: RawCall[] = [];
   // `options` and `client` are private on the class, so an intersection type would
   // collapse to `never`. Cast through unknown and keep the public surface typed.
@@ -104,6 +110,7 @@ const buildService = (config?: {
   Object.assign(service, {
     createInfaktInvoices: invoices.create,
     createInfaktRunStates: runState.create,
+    createInfaktSettings: settings.create,
     getRawSql: () => ({
       raw: (sql: string, bindings: readonly unknown[]) => {
         rawCalls.push({ bindings, sql });
@@ -112,8 +119,10 @@ const buildService = (config?: {
     }),
     listInfaktInvoices: invoices.list,
     listInfaktRunStates: runState.list,
+    listInfaktSettings: settings.list,
     updateInfaktInvoices: invoices.update,
     updateInfaktRunStates: runState.update,
+    updateInfaktSettings: settings.update,
   });
 
   // Normally set by the real constructor, which is not run here. Both fields are
@@ -124,7 +133,7 @@ const buildService = (config?: {
     internals.client = config.client;
   }
 
-  return { invoices, rawCalls, runState, service };
+  return { invoices, rawCalls, runState, service, settings };
 };
 
 describe("publicOptions", () => {
@@ -465,5 +474,118 @@ describe("verifyKsefIntegration", () => {
     expect(result).toMatchObject({ active: false, error: "socket hang up" });
     expect(runState.rows[0].ksef_active).toBe(true);
     expect(runState.rows[0].ksef_error).toBe("socket hang up");
+  });
+});
+
+describe("getSettings", () => {
+  it("mints the singleton on first access, paused by default", async () => {
+    const { service, settings } = buildService();
+    const row = await service.getSettings();
+    expect(row).toMatchObject({ id: SETTINGS_SINGLETON_KEY, invoicing_paused: true });
+    expect(settings.rows).toHaveLength(1);
+  });
+
+  it("returns the existing row without creating a second", async () => {
+    const { service, settings } = buildService({
+      settings: [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: false }],
+    });
+    const row = await service.getSettings();
+    expect(row).toMatchObject({ invoicing_paused: false });
+    expect(settings.rows).toHaveLength(1);
+  });
+
+  it("survives losing the first-ever-access race", async () => {
+    const { service } = buildService();
+    let created = false;
+    Object.assign(service, {
+      createInfaktSettings: () => {
+        created = true;
+        return Promise.reject(new Error("duplicate key"));
+      },
+      listInfaktSettings: () =>
+        Promise.resolve(created ? [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: true }] : []),
+    });
+    await expect(service.getSettings()).resolves.toMatchObject({ id: SETTINGS_SINGLETON_KEY });
+  });
+});
+
+describe("setInvoicingPaused", () => {
+  it("mints the singleton if needed, then writes the switch", async () => {
+    const { service, settings } = buildService();
+    await service.setInvoicingPaused(false);
+    expect(settings.rows[0]).toMatchObject({ id: SETTINGS_SINGLETON_KEY, invoicing_paused: false });
+  });
+
+  it("flips an existing row", async () => {
+    const { service, settings } = buildService({
+      settings: [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: true }],
+    });
+    await service.setInvoicingPaused(false);
+    expect(settings.rows[0].invoicing_paused).toBe(false);
+    await service.setInvoicingPaused(true);
+    expect(settings.rows[0].invoicing_paused).toBe(true);
+  });
+});
+
+describe("getEffectiveEnablement", () => {
+  const ENV_VAR = "INFAKT_INVOICING_DISABLED";
+  const originalValue = process.env[ENV_VAR];
+
+  beforeEach(() => {
+    delete process.env[ENV_VAR];
+  });
+
+  afterEach(() => {
+    if (originalValue === undefined) {
+      delete process.env[ENV_VAR];
+    } else {
+      process.env[ENV_VAR] = originalValue;
+    }
+  });
+
+  it("is active when apiKey is configured, not paused, and the env flag is unset", async () => {
+    const { service } = buildService({
+      settings: [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: false }],
+    });
+    await expect(service.getEffectiveEnablement()).resolves.toMatchObject({
+      apiKeyConfigured: true,
+      effectiveEnabled: true,
+      envForceDisabled: false,
+      invoicingPaused: false,
+      reason: "active",
+    });
+  });
+
+  it("reports no_api_key when apiKey is absent, regardless of the pause switch", async () => {
+    const { service } = buildService({
+      options: { apiKey: undefined },
+      settings: [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: false }],
+    });
+    await expect(service.getEffectiveEnablement()).resolves.toMatchObject({
+      effectiveEnabled: false,
+      reason: "no_api_key",
+    });
+  });
+
+  it("reports paused when apiKey is configured but a fresh singleton has not been unpaused", async () => {
+    // No settings row at all - getSettings mints one, paused by default.
+    const { service } = buildService();
+    await expect(service.getEffectiveEnablement()).resolves.toMatchObject({
+      effectiveEnabled: false,
+      invoicingPaused: true,
+      reason: "paused",
+    });
+  });
+
+  it("reports env_force_disabled, outranking an apiKey and an unpaused switch", async () => {
+    process.env[ENV_VAR] = "true";
+    const { service } = buildService({
+      settings: [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: false }],
+    });
+    await expect(service.getEffectiveEnablement()).resolves.toMatchObject({
+      effectiveEnabled: false,
+      envForceDisabled: true,
+      reason: "env_force_disabled",
+    });
   });
 });

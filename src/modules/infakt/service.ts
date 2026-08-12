@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import { MedusaError, MedusaService } from "@medusajs/framework/utils";
 import { InfaktClient } from "../../lib/infakt";
 import type { InfaktKsefIntegration } from "../../lib/infakt";
+import {
+  isInvoicingForceDisabledByEnv,
+  resolveEffectiveEnablement,
+} from "../../lib/invoicing/enablement";
+import type { EffectiveEnablement } from "../../lib/invoicing/enablement";
 import { resolveInfaktOptions, toPublicInfaktOptions } from "../../lib/options";
 import type {
   InfaktPluginOptions,
@@ -11,6 +16,7 @@ import type {
 import { isClaimActive, staleClaimCutoff } from "./claim-logic";
 import InfaktInvoiceModel from "./models/infakt-invoice";
 import InfaktRunStateModel from "./models/infakt-run-state";
+import InfaktSettingsModel from "./models/infakt-settings";
 
 /**
  * How long a claim stays valid before another run may take it over.
@@ -24,6 +30,11 @@ export const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 /** The one InfaktRunState row ever expected to exist. */
 export const RUN_STATE_SINGLETON_KEY = "singleton";
+/** The one InfaktSettings row ever expected to exist. A separate table from the
+ * run state on purpose: one is operational status the worker owns, the other is
+ * an admin-editable setting, and mixing them would make "who writes this column"
+ * ambiguous. */
+export const SETTINGS_SINGLETON_KEY = "singleton";
 
 /**
  * Physical table behind InfaktInvoiceModel. Named here for the same reason as the
@@ -93,6 +104,7 @@ const rawRows = <TRow>(result: { rows?: TRow[] } | TRow[] | undefined): TRow[] =
 export default class InfaktModuleService extends MedusaService({
   InfaktInvoice: InfaktInvoiceModel,
   InfaktRunState: InfaktRunStateModel,
+  InfaktSettings: InfaktSettingsModel,
 }) {
   private readonly options: ResolvedInfaktOptions;
   private client?: InfaktClient;
@@ -199,6 +211,62 @@ export default class InfaktModuleService extends MedusaService({
       }
       throw error;
     }
+  }
+
+  /**
+   * The one InfaktSettings row, created on first access. Mirrors `getRunState`'s
+   * mint-on-first-access pattern, with `invoicing_paused: true` passed explicitly
+   * rather than left to the model's column default - this is the one guarantee in
+   * the whole plugin that must not depend on a single layer getting it right, so
+   * the application code and the migration's `default(true)` say the same thing
+   * independently.
+   */
+  async getSettings() {
+    const [existing] = await this.listInfaktSettings({ id: [SETTINGS_SINGLETON_KEY] });
+    if (existing) {
+      return existing;
+    }
+    try {
+      return await this.createInfaktSettings({
+        id: SETTINGS_SINGLETON_KEY,
+        invoicing_paused: true,
+      });
+    } catch (error) {
+      const [raced] = await this.listInfaktSettings({ id: [SETTINGS_SINGLETON_KEY] });
+      if (raced) {
+        return raced;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Flip the pause switch. The only writer of `invoicing_paused` - every other
+   * reader treats the settings row as read-only.
+   */
+  async setInvoicingPaused(paused: boolean) {
+    await this.getSettings();
+    return await this.updateInfaktSettings({
+      id: SETTINGS_SINGLETON_KEY,
+      invoicing_paused: paused,
+    });
+  }
+
+  /**
+   * The plugin's full runtime enablement: `apiKey`, the persisted pause switch,
+   * and the environment-level force-off, combined into one answer with one
+   * reason. Called by the subscriber on every trigger event and by the worker on
+   * every tick - `resolvedOptions.enabled` is fixed at boot, but the other two
+   * inputs are not, and checking them only once would miss every later change an
+   * admin (or an operator setting the env var) makes.
+   */
+  async getEffectiveEnablement(): Promise<EffectiveEnablement> {
+    const settings = await this.getSettings();
+    return resolveEffectiveEnablement({
+      apiKeyConfigured: this.options.enabled,
+      envForceDisabled: isInvoicingForceDisabledByEnv(),
+      invoicingPaused: Boolean((settings as { invoicing_paused?: boolean }).invoicing_paused),
+    });
   }
 
   /**

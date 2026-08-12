@@ -1,6 +1,7 @@
 import type { SubscriberArgs } from "@medusajs/framework";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { describe, expect, it, vi } from "vitest";
+import { resolveEffectiveEnablement } from "../lib/invoicing/enablement";
 import { resolveInfaktOptions } from "../lib/options";
 import type { InfaktPluginOptions } from "../lib/options";
 import { INFAKT_MODULE } from "../modules/infakt";
@@ -17,6 +18,8 @@ const harness = (setup?: {
   options?: Partial<InfaktPluginOptions>;
   orderId?: string | null;
   enqueue?: ReturnType<typeof vi.fn>;
+  invoicingPaused?: boolean;
+  envForceDisabled?: boolean;
 }) => {
   const log = logger();
   const enqueueOrder = setup?.enqueue ?? vi.fn().mockResolvedValue({ created: true });
@@ -26,13 +29,21 @@ const harness = (setup?: {
         ? [{ id: "pay_1", payment_collection: null }]
         : [{ id: "pay_1", payment_collection: { order: { id: setup?.orderId ?? "order_1" } } }],
   });
+  const resolvedOptions = resolveInfaktOptions({
+    apiKey: "k",
+    startDate: "2026-07-01",
+    ...setup?.options,
+  });
   const infakt = {
     enqueueOrder,
-    resolvedOptions: resolveInfaktOptions({
-      apiKey: "k",
-      startDate: "2026-07-01",
-      ...setup?.options,
-    }),
+    getEffectiveEnablement: vi.fn().mockResolvedValue(
+      resolveEffectiveEnablement({
+        apiKeyConfigured: resolvedOptions.enabled,
+        envForceDisabled: setup?.envForceDisabled ?? false,
+        invoicingPaused: setup?.invoicingPaused ?? false,
+      }),
+    ),
+    resolvedOptions,
   };
 
   const container = {
@@ -103,6 +114,22 @@ describe("enqueueInvoiceSubscriber", () => {
     await run(container, "payment.captured", "pay_1");
     expect(enqueueOrder).not.toHaveBeenCalled();
     expect(graph).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while invoicing is paused, even with apiKey configured", async () => {
+    const { container, enqueueOrder, graph } = harness({ invoicingPaused: true });
+    await run(container, "payment.captured", "pay_1");
+    expect(enqueueOrder).not.toHaveBeenCalled();
+    expect(graph).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when force-disabled by the environment, even if not paused", async () => {
+    const { container, enqueueOrder } = harness({
+      envForceDisabled: true,
+      invoicingPaused: false,
+    });
+    await run(container, "payment.captured", "pay_1");
+    expect(enqueueOrder).not.toHaveBeenCalled();
   });
 
   it("still enqueues when startDate is unset - it is no longer an enable switch", async () => {
