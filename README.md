@@ -149,16 +149,39 @@ Every option is validated in the module loader, so a misconfiguration is a boot 
 with a precise message rather than an opaque 401 or 422 in the middle of a customer's
 checkout.
 
-### Enablement: `apiKey` is the only switch
+### Enablement: `apiKey`, the pause switch, and the environment force-off
 
 The plugin should simply work when it is configured and do nothing when it is not.
-That is `apiKey`'s entire job: absent or blank, the plugin boots inert - no order is
-ever enqueued or invoiced - with one clear line in the boot log and in the admin UI.
-Set it, and the plugin is fully active. There is no separate enable flag; unwiring
-the credential is the supported way to turn this integration off.
+`apiKey` is that switch at the config level: absent or blank, the plugin boots
+inert - no order is ever enqueued or invoiced - with one clear line in the boot
+log and in the admin UI. Set it, and the plugin is fully active.
 
 This is the one option that does not throw when it is missing. Every other option,
 including `startDate`, fails loudly at boot when it is malformed.
+
+That is not the whole story, though, because `apiKey` alone is not a safe signal to
+start invoicing. A store cutting over from a legacy invoicing system has `apiKey`
+configured from day one - the admin UI needs it to render at all - but invoicing has
+to stay off until an operator deliberately turns it on. Two more layers sit on top of
+`apiKey`, checked fresh on every subscriber invocation and every worker tick (not
+just at boot, because both of these CAN change without a restart):
+
+1. **The pause switch** (`invoicing_paused`, in the `InfaktSettings` table). Editable
+   live from the Invoicing page or the Settings widget. **Defaults to `true`** on a
+   fresh install - a store that already has `apiKey` configured does not start
+   issuing invoices the moment it boots. An operator resumes it explicitly.
+2. **`INFAKT_INVOICING_DISABLED`** (environment variable; `1`, `true` or `yes`,
+   case-insensitively). A hard, operator-controlled force-off that cannot be
+   released from inside the admin - it overrides everything, including an admin
+   having already unpaused invoicing. Meant for a deploy-time emergency brake, not
+   day-to-day operation.
+
+The combined answer - `effectiveEnabled = apiKeyPresent && !invoicingPaused &&
+!envForceDisabled` - is what the subscriber and the worker actually check. `GET
+/admin/infakt/settings` reports it, along with which of the three is responsible
+(`reason`: `active`, `no_api_key`, `paused`, or `env_force_disabled`), and
+`POST /admin/infakt/settings { "invoicing_paused": boolean }` is the only way to
+flip the pause switch.
 
 ### `startDate` is optional, not an enable switch
 
@@ -177,15 +200,21 @@ different day than it reads as.
 
 ## Environment variables
 
-| Variable             | Default       | Effect                            |
-| -------------------- | ------------- | --------------------------------- |
-| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Cron schedule for the worker job. |
+| Variable                    | Default       | Effect                                                                 |
+| --------------------------- | ------------- | ---------------------------------------------------------------------- |
+| `INFAKT_WORKER_CRON`        | `*/5 * * * *` | Cron schedule for the worker job.                                      |
+| `INFAKT_INVOICING_DISABLED` | unset         | `1`/`true`/`yes` force-disables invoicing, overriding everything else. |
 
 **Why the cron is not an option.** Medusa evaluates a scheduled job's `config.schedule`
 at plugin-load time, before the DI container - and therefore this plugin's options -
 exists. There is no supported way for a static `config` export to read a resolved
-module's options, so this one setting has to be an environment variable. It is the only
-one.
+module's options, so this one setting has to be an environment variable.
+
+**Why the force-off is an environment variable too, and not a plugin option.** Unlike
+the pause switch, this one is deliberately NOT reachable from the admin - an operator
+flips it at deploy time (or during an incident) without touching the database, and it
+cannot be undone by anyone clicking around in the admin. See
+[Enablement](#enablement-apikey-the-pause-switch-and-the-environment-force-off) above.
 
 ## How an order becomes an invoice
 
@@ -461,16 +490,24 @@ invoice looking broken.
 
 All routes live under `/admin` and use Medusa's default admin authentication.
 
-| Route                        | Method | Purpose                                                                 |
-| ---------------------------- | ------ | ----------------------------------------------------------------------- |
-| `/admin/infakt`              | GET    | Configuration, worker run state, per-status counts, crash-window count. |
-| `/admin/infakt/invoices`     | GET    | The ledger. `?status=`, `?limit=`, `?offset=`.                          |
-| `/admin/infakt/invoices/:id` | POST   | `{ action: "retry" \| "adopt" \| "clear" \| "skip", ... }`.             |
-| `/admin/infakt/ksef-check`   | POST   | Re-verify the KSeF integration now.                                     |
-| `/admin/infakt/enqueue`      | POST   | `{ order_id }`. Queue an order the trigger missed.                      |
+| Route                        | Method    | Purpose                                                                                        |
+| ---------------------------- | --------- | ---------------------------------------------------------------------------------------------- |
+| `/admin/infakt`              | GET       | Configuration, worker run state, per-status counts, crash-window count.                        |
+| `/admin/infakt/invoices`     | GET       | The ledger. `?status=`, `?limit=`, `?offset=`.                                                 |
+| `/admin/infakt/invoices/:id` | POST      | `{ action: "retry" \| "adopt" \| "clear" \| "skip", ... }`.                                    |
+| `/admin/infakt/ksef-check`   | POST      | Re-verify the KSeF integration now.                                                            |
+| `/admin/infakt/enqueue`      | POST      | `{ order_id }`. Queue an order the trigger missed.                                             |
+| `/admin/infakt/settings`     | GET, POST | The effective-enablement picture; `POST { invoicing_paused: boolean }` flips the pause switch. |
 
 A refused action answers **409** with the reason: the request was well-formed, and it is
 the row's state that makes it impossible. The reason is written for the person reading it.
+
+Every route in this table answers with a normal 200 (or a 409 refusal) in every plugin
+state, including fully disabled, unconfigured, paused, or with an empty ledger - none of
+them ever throw into the admin UI over that. The two that touch inFakt directly
+(`ksef-check`, and `invoices/:id` for an `adopt`) guard on `apiKey` being configured
+before reaching `apiClient`, and answer with the same shape they would on success rather
+than surfacing the getter's throw.
 
 The API key never appears in any response - the configuration is filtered through a
 public-options shape that does not carry it.
@@ -498,22 +535,25 @@ pnpm build         # medusa plugin:build
 
 Everything runs without a database or network access. What each area covers:
 
-| File                                     | Covers                                                                                                                                           |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `lib/infakt/client.test.ts`              | The API client: auth header, base URLs, response mapping, error shapes, the KSeF-2.0 fallback.                                                   |
-| `lib/invoicing/builder.test.ts`          | The payload rules, the total-match guard, and that no rejection reason leaks buyer data.                                                         |
-| `lib/invoicing/money.test.ts`            | Minor-unit conversion, Warsaw calendar dates, strict date validation.                                                                            |
-| `lib/options.test.ts`                    | Every boot failure, `apiKey` as the enable switch, `startDate` as an optional floor, and that the public option shape never carries the API key. |
-| `lib/invoicing/nip.test.ts`              | Normalization, the checksum, the `company`-field heuristic, the extractor's precedence.                                                          |
-| `lib/invoicing/ksef.test.ts`             | Mode decisions, the custom predicate's override, `requireActive` defaults.                                                                       |
-| `lib/invoicing/paid.test.ts`             | The fully-paid gate: partial captures, refunds, canceled collections, float drift.                                                               |
-| `lib/invoicing/state-machine.test.ts`    | Backoff, outcome classification, and `nextStep` - including the crash-window refusal.                                                            |
-| `lib/invoicing/pipeline.test.ts`         | The steps in order, resume from every intermediate state, the KSeF 422 ambiguity, and the backfilled-order guard.                                |
-| `lib/invoicing/operator-actions.test.ts` | What an operator may and may not do to a parked row.                                                                                             |
-| `lib/invoicing/matching.test.ts`         | The reconciliation engine's three stages and its date tiebreak.                                                                                  |
-| `lib/invoicing/order-mapper.test.ts`     | Medusa DTO mapping, plus mapper-and-builder end to end.                                                                                          |
-| `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, and what the KSeF check persists.                                                                     |
-| `workflows/`, `api/`, `subscribers/`     | Compensation capture, route contracts, and that the trigger only ever enqueues.                                                                  |
+| File                                     | Covers                                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/infakt/client.test.ts`              | The API client: auth header, base URLs, response mapping, error shapes, the KSeF-2.0 fallback.                                                                      |
+| `lib/invoicing/builder.test.ts`          | The payload rules, the total-match guard, and that no rejection reason leaks buyer data.                                                                            |
+| `lib/invoicing/money.test.ts`            | Minor-unit conversion, Warsaw calendar dates, strict date validation.                                                                                               |
+| `lib/options.test.ts`                    | Every boot failure, `apiKey` as the enable switch, `startDate` as an optional floor, and that the public option shape never carries the API key.                    |
+| `lib/invoicing/nip.test.ts`              | Normalization, the checksum, the `company`-field heuristic, the extractor's precedence.                                                                             |
+| `lib/invoicing/ksef.test.ts`             | Mode decisions, the custom predicate's override, `requireActive` defaults.                                                                                          |
+| `lib/invoicing/paid.test.ts`             | The fully-paid gate: partial captures, refunds, canceled collections, float drift.                                                                                  |
+| `lib/invoicing/state-machine.test.ts`    | Backoff, outcome classification, and `nextStep` - including the crash-window refusal.                                                                               |
+| `lib/invoicing/pipeline.test.ts`         | The steps in order, resume from every intermediate state, the KSeF 422 ambiguity, and the backfilled-order guard.                                                   |
+| `lib/invoicing/operator-actions.test.ts` | What an operator may and may not do to a parked row.                                                                                                                |
+| `lib/invoicing/matching.test.ts`         | The reconciliation engine's three stages and its date tiebreak.                                                                                                     |
+| `lib/invoicing/order-mapper.test.ts`     | Medusa DTO mapping, plus mapper-and-builder end to end.                                                                                                             |
+| `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, what the KSeF check persists, and the settings singleton.                                                                |
+| `lib/invoicing/enablement.test.ts`       | The three-source precedence (`apiKey`, pause switch, env force-off) and the env flag's accepted spellings.                                                          |
+| `jobs/infakt-invoicing.test.ts`          | The enablement gate: the worker never claims a run when not effectively enabled, checked fresh every tick.                                                          |
+| `workflows/set-invoicing-paused.test.ts` | The pause switch's write-and-compensate pair, including the round trip back to the original value.                                                                  |
+| `workflows/`, `api/`, `subscribers/`     | Compensation capture, route contracts, that every admin route answers 200/409 rather than throwing when disabled or empty, and that the trigger only ever enqueues. |
 
 `service.test.ts` builds a `this` on top of `InfaktModuleService.prototype` with the
 generated CRUD methods and the raw-SQL escape hatch stubbed, so the real method bodies
