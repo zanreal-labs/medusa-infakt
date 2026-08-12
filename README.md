@@ -24,6 +24,7 @@ follows from that.
 - [How an order becomes an invoice](#how-an-order-becomes-an-invoice)
 - [The crash window, and why the create is never retried](#the-crash-window-and-why-the-create-is-never-retried)
 - [The total-match guard](#the-total-match-guard)
+- [Orders backfilled from a legacy system](#orders-backfilled-from-a-legacy-system)
 - [Where the buyer's NIP comes from](#where-the-buyers-nip-comes-from)
 - [KSeF](#ksef)
 - [Operator runbook: needs_review](#operator-runbook-needs_review)
@@ -42,8 +43,9 @@ follows from that.
 1. A trigger event (`payment.captured` by default) **queues** the order. That is all the
    event does.
 2. A scheduled worker drives each queued order to completion, sequentially:
-   - verifies the order is **fully paid**, in the configured currency, not canceled, and
-     placed on or after `startDate`;
+   - verifies the order is not already invoiced outside this pipeline, is **fully
+     paid**, in the configured currency, not canceled, and placed on or after
+     `startDate` (when one is configured);
    - builds the inFakt payload and verifies the line sum **equals the order total exactly**;
    - creates the invoice in inFakt and waits for its async task to settle;
    - reads the number inFakt assigned (numbering is entirely inFakt's job);
@@ -89,10 +91,14 @@ module.exports = defineConfig({
     {
       resolve: "@zanreal/medusa-infakt",
       options: {
+        // The plugin's enable switch. Unset (or point this at an env var that is
+        // not set) and the plugin boots inert, with one line in the boot log.
         apiKey: process.env.INFAKT_API_KEY,
         environment: "production",
-        // REQUIRED. Nothing placed before this date is invoiced.
-        startDate: "2026-08-01",
+        // Optional. Leave it unset to invoice every order the pipeline sees.
+        // Set it when installing onto a store with a back catalogue this plugin
+        // should not touch - orders placed before it are skipped.
+        // startDate: "2026-08-01",
         currency: "PLN",
         taxSymbol: "23",
         ksef: { mode: "nip-only", requireActive: true },
@@ -126,9 +132,9 @@ module the plugin registers (there is one: `infakt`).
 
 | Option               | Type                                   | Default              | Notes                                                                                                                                          |
 | -------------------- | -------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apiKey`             | `string`                               | -                    | **Required.** inFakt API key, sent as `X-inFakt-ApiKey`. Read it from an env var; the plugin never reads `process.env` for credentials itself. |
+| `apiKey`             | `string`                               | -                    | **The enable switch.** inFakt API key, sent as `X-inFakt-ApiKey`. Absent or blank leaves the plugin inert; see below. Read it from an env var. |
 | `environment`        | `"production" \| "sandbox"`            | `"production"`       | See the sandbox note above.                                                                                                                    |
-| `startDate`          | `string`                               | -                    | **Required in practice**, strict `YYYY-MM-DD`. Orders placed before it are skipped. See below.                                                 |
+| `startDate`          | `string`                               | -                    | **Optional**, strict `YYYY-MM-DD`. Orders placed before it are skipped. Absent means no floor. See below.                                      |
 | `currency`           | `string`                               | `"PLN"`              | Orders in any other currency are skipped with a reason.                                                                                        |
 | `taxSymbol`          | `string`                               | `"23"`               | inFakt VAT rate symbol applied to every line.                                                                                                  |
 | `triggerEvent`       | `"payment.captured" \| "order.placed"` | `"payment.captured"` | Which event queues an order. Medusa has no `order.paid` event.                                                                                 |
@@ -143,19 +149,31 @@ Every option is validated in the module loader, so a misconfiguration is a boot 
 with a precise message rather than an opaque 401 or 422 in the middle of a customer's
 checkout.
 
-### `startDate` is the one option that does not throw
+### Enablement: `apiKey` is the only switch
 
-An absent or malformed `startDate` **disables the whole pipeline** instead of failing to
-boot, and both the startup log and the admin UI say so in as many words.
+The plugin should simply work when it is configured and do nothing when it is not.
+That is `apiKey`'s entire job: absent or blank, the plugin boots inert - no order is
+ever enqueued or invoiced - with one clear line in the boot log and in the admin UI.
+Set it, and the plugin is fully active. There is no separate enable flag; unwiring
+the credential is the supported way to turn this integration off.
 
-The alternative default - invoice everything - would, on an existing store, issue a real
-invoice for every historical order and file each B2B one to KSeF. Neither can be undone.
-A store that boots with invoicing visibly off is recoverable; one that boots and starts
-issuing is not.
+This is the one option that does not throw when it is missing. Every other option,
+including `startDate`, fails loudly at boot when it is malformed.
 
-The date is validated as a strict calendar date, and the parse has to round-trip:
-`Date.parse("2026-02-30")` succeeds by rolling over to March 2nd, which would make a
-fat-fingered floor silently mean a different day than it reads as.
+### `startDate` is optional, not an enable switch
+
+Leave it unset and every order the pipeline otherwise sees is invoiced, subject to
+every other gate (fully paid, right currency, not canceled, not already invoiced
+outside this pipeline - see below). There is no back-catalogue risk in leaving it
+unset on a brand-new store: it is a floor for stores that already have order
+history this plugin should not touch, not a precondition for the plugin to run.
+
+Set it to add that floor. It must be exactly `YYYY-MM-DD` and a real calendar date -
+a value that is present but malformed still fails loudly at boot rather than being
+read as "unset", because a typo here must not silently turn into "invoice
+everything". The parse has to round-trip: `Date.parse("2026-02-30")` succeeds by
+rolling over to March 2nd, which would make a fat-fingered floor silently mean a
+different day than it reads as.
 
 ## Environment variables
 
@@ -176,7 +194,7 @@ payment.captured  ->  subscriber  ->  InfaktInvoice row (status: pending)
                                              |
                         worker tick (every 5 min, single-flighted)
                                              |
-                        gates: startDate, currency, canceled, fully paid
+                        gates: not backfilled, startDate, currency, canceled, fully paid
                                              |
                         submit_started_at  ->  POST /async/invoices.json
                                              |
@@ -273,6 +291,32 @@ Practically:
 
 Shipping becomes one line per method that costs anything, labelled
 `Dostawa - {method name}`. Free methods produce no line.
+
+## Orders backfilled from a legacy system
+
+A store migrating off an older invoicing system typically ports its order history
+into Medusa with the invoice it already issued recorded on the order itself, not in
+this plugin's ledger: `order.metadata.invoice_number` (and usually
+`metadata.invoice_source`, naming where it came from).
+
+The worker treats a non-empty `invoice_number` in that metadata as a fact, not a
+suggestion. Before any other check runs, an order carrying one is skipped with
+`skip_reason: "already invoiced outside the pipeline"`, and nothing is ever
+submitted to inFakt for it. This is a build-time gate, so it holds no matter which
+path put the row in the queue - an `order.placed` trigger firing at import time, or
+an operator manually queuing it through `POST /admin/infakt/enqueue`.
+
+Two structural facts make this a narrower problem than it first sounds:
+
+- **A backfilled order has no Medusa payment**, so `payment.captured` never fires
+  for it. A store on the default trigger never enqueues these orders at all - the
+  metadata guard above is the safety net for `order.placed`-triggered stores and
+  for the manual recovery endpoint, not the first line of defense.
+- **The reconciliation engine only touches rows already in this plugin's ledger.**
+  `lib/invoicing/matching.ts` exists to adopt a stray inFakt invoice onto an
+  existing `infakt_invoice` row - it is not wired to a route yet (see
+  [Roadmap](#roadmap)) - and even once it is, it will never create a row for an
+  order the pipeline has not already enqueued. It cannot import history on its own.
 
 ## Where the buyer's NIP comes from
 
@@ -454,22 +498,22 @@ pnpm build         # medusa plugin:build
 
 Everything runs without a database or network access. What each area covers:
 
-| File                                     | Covers                                                                                         |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `lib/infakt/client.test.ts`              | The API client: auth header, base URLs, response mapping, error shapes, the KSeF-2.0 fallback. |
-| `lib/invoicing/builder.test.ts`          | The payload rules, the total-match guard, and that no rejection reason leaks buyer data.       |
-| `lib/invoicing/money.test.ts`            | Minor-unit conversion, Warsaw calendar dates, strict date validation.                          |
-| `lib/options.test.ts`                    | Every boot failure, and that the public option shape never carries the API key.                |
-| `lib/invoicing/nip.test.ts`              | Normalization, the checksum, the `company`-field heuristic, the extractor's precedence.        |
-| `lib/invoicing/ksef.test.ts`             | Mode decisions, the custom predicate's override, `requireActive` defaults.                     |
-| `lib/invoicing/paid.test.ts`             | The fully-paid gate: partial captures, refunds, canceled collections, float drift.             |
-| `lib/invoicing/state-machine.test.ts`    | Backoff, outcome classification, and `nextStep` - including the crash-window refusal.          |
-| `lib/invoicing/pipeline.test.ts`         | The steps in order, resume from every intermediate state, and the KSeF 422 ambiguity.          |
-| `lib/invoicing/operator-actions.test.ts` | What an operator may and may not do to a parked row.                                           |
-| `lib/invoicing/matching.test.ts`         | The reconciliation engine's three stages and its date tiebreak.                                |
-| `lib/invoicing/order-mapper.test.ts`     | Medusa DTO mapping, plus mapper-and-builder end to end.                                        |
-| `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, and what the KSeF check persists.                   |
-| `workflows/`, `api/`, `subscribers/`     | Compensation capture, route contracts, and that the trigger only ever enqueues.                |
+| File                                     | Covers                                                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `lib/infakt/client.test.ts`              | The API client: auth header, base URLs, response mapping, error shapes, the KSeF-2.0 fallback.                                                   |
+| `lib/invoicing/builder.test.ts`          | The payload rules, the total-match guard, and that no rejection reason leaks buyer data.                                                         |
+| `lib/invoicing/money.test.ts`            | Minor-unit conversion, Warsaw calendar dates, strict date validation.                                                                            |
+| `lib/options.test.ts`                    | Every boot failure, `apiKey` as the enable switch, `startDate` as an optional floor, and that the public option shape never carries the API key. |
+| `lib/invoicing/nip.test.ts`              | Normalization, the checksum, the `company`-field heuristic, the extractor's precedence.                                                          |
+| `lib/invoicing/ksef.test.ts`             | Mode decisions, the custom predicate's override, `requireActive` defaults.                                                                       |
+| `lib/invoicing/paid.test.ts`             | The fully-paid gate: partial captures, refunds, canceled collections, float drift.                                                               |
+| `lib/invoicing/state-machine.test.ts`    | Backoff, outcome classification, and `nextStep` - including the crash-window refusal.                                                            |
+| `lib/invoicing/pipeline.test.ts`         | The steps in order, resume from every intermediate state, the KSeF 422 ambiguity, and the backfilled-order guard.                                |
+| `lib/invoicing/operator-actions.test.ts` | What an operator may and may not do to a parked row.                                                                                             |
+| `lib/invoicing/matching.test.ts`         | The reconciliation engine's three stages and its date tiebreak.                                                                                  |
+| `lib/invoicing/order-mapper.test.ts`     | Medusa DTO mapping, plus mapper-and-builder end to end.                                                                                          |
+| `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, and what the KSeF check persists.                                                                     |
+| `workflows/`, `api/`, `subscribers/`     | Compensation capture, route contracts, and that the trigger only ever enqueues.                                                                  |
 
 `service.test.ts` builds a `this` on top of `InfaktModuleService.prototype` with the
 generated CRUD methods and the raw-SQL escape hatch stubbed, so the real method bodies
