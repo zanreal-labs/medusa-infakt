@@ -47,7 +47,7 @@ export default async function enqueueInvoiceSubscriber({
   if (event.name !== options.triggerEvent) {
     return;
   }
-  if (options.startDate === null) {
+  if (!options.enabled) {
     // The loader already said this loudly at boot; do not repeat it per order.
     return;
   }

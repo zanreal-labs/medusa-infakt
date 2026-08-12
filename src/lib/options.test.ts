@@ -20,6 +20,7 @@ describe("resolveInfaktOptions: defaults", () => {
     expect(resolved).toMatchObject({
       currency: DEFAULT_CURRENCY,
       emitIssuedEvent: true,
+      enabled: true,
       environment: "production",
       ksefMode: "nip-only",
       ksefPossible: true,
@@ -51,21 +52,53 @@ describe("resolveInfaktOptions: defaults", () => {
   });
 });
 
-describe("resolveInfaktOptions: startDate is the one option that does not throw", () => {
-  it("resolves an absent or malformed value to null, disabling the pipeline", () => {
-    // Failing to boot over a date is worse than booting with invoicing visibly off,
-    // and the alternative default - invoice everything - would issue a real invoice
-    // for every historical order on an existing store.
-    for (const startDate of [undefined, "", "  ", "2026-7-1", "2026", "0", "tomorrow"]) {
-      expect(resolveInfaktOptions(valid({ startDate })).startDate).toBeNull();
+describe("resolveInfaktOptions: apiKey is the plugin's enable switch", () => {
+  it("resolves an absent or blank apiKey to disabled, without throwing", () => {
+    // The plugin should simply work when configured and do nothing when it is
+    // not. Failing to boot over a missing credential is a worse outcome than
+    // booting with invoicing visibly off.
+    for (const apiKey of [undefined, "", "   "]) {
+      const resolved = resolveInfaktOptions(valid({ apiKey }));
+      expect(resolved.enabled).toBe(false);
+      expect(resolved.apiKey).toBeNull();
+    }
+  });
+
+  it("resolves a present apiKey to enabled", () => {
+    const resolved = resolveInfaktOptions(valid({ apiKey: "k" }));
+    expect(resolved.enabled).toBe(true);
+    expect(resolved.apiKey).toBe("k");
+  });
+});
+
+describe("resolveInfaktOptions: startDate is optional, not an enable switch", () => {
+  it("resolves an absent or blank value to null - no date floor, not disabled", () => {
+    for (const startDate of [undefined, "", "  "]) {
+      const resolved = resolveInfaktOptions(valid({ startDate }));
+      expect(resolved.startDate).toBeNull();
+      expect(resolved.enabled).toBe(true);
+    }
+  });
+
+  it("rejects a malformed value loudly rather than treating it as absent", () => {
+    // A typo here must not silently mean "no floor" - that is exactly the
+    // opposite of the operator's intent when they set this option at all.
+    for (const startDate of ["2026-7-1", "2026", "0", "tomorrow"]) {
+      expect(() => resolveInfaktOptions(valid({ startDate }))).toThrow(
+        /`startDate` must be a strict YYYY-MM-DD calendar date/u,
+      );
     }
   });
 
   it("rejects a well-shaped but impossible date", () => {
     // Date.parse("2026-02-30") succeeds by rolling over to March 2nd, which would make
     // a fat-fingered floor silently mean a different day than it reads as.
-    expect(resolveInfaktOptions(valid({ startDate: "2026-02-30" })).startDate).toBeNull();
-    expect(resolveInfaktOptions(valid({ startDate: "2026-13-01" })).startDate).toBeNull();
+    expect(() => resolveInfaktOptions(valid({ startDate: "2026-02-30" }))).toThrow(
+      /`startDate` must be a strict YYYY-MM-DD calendar date/u,
+    );
+    expect(() => resolveInfaktOptions(valid({ startDate: "2026-13-01" }))).toThrow(
+      /`startDate` must be a strict YYYY-MM-DD calendar date/u,
+    );
   });
 
   it("accepts a strict calendar date, trimmed", () => {
@@ -84,12 +117,6 @@ describe("resolveInfaktOptions: boot failures", () => {
 
   it("requires an options object at all", () => {
     expectError(undefined, /no plugin options were provided/u);
-  });
-
-  it("requires an api key", () => {
-    for (const apiKey of [undefined, "", "   "]) {
-      expectError(valid({ apiKey }), /`apiKey` is required/u);
-    }
   });
 
   it("rejects an unknown environment", () => {
@@ -145,7 +172,7 @@ describe("resolveInfaktOptions: boot failures", () => {
 
   it("points at the README from every message", () => {
     try {
-      resolveInfaktOptions({});
+      resolveInfaktOptions(valid({ environment: "invalid" as never }));
       expect.fail("should throw");
     } catch (error) {
       expect((error as Error).message).toContain("medusa-infakt#options");
@@ -172,10 +199,15 @@ describe("toPublicInfaktOptions", () => {
     ).toBe(true);
   });
 
-  it("reports disabled exactly when startDate is null", () => {
+  it("reports disabled exactly when apiKey is absent, never because of startDate", () => {
     expect(toPublicInfaktOptions(resolveInfaktOptions(valid())).disabled).toBe(false);
-    expect(toPublicInfaktOptions(resolveInfaktOptions(valid({ startDate: "nope" }))).disabled).toBe(
+    expect(toPublicInfaktOptions(resolveInfaktOptions(valid({ apiKey: undefined }))).disabled).toBe(
       true,
     );
+    // An order with no date floor is still an ACTIVE configuration - startDate no
+    // longer doubles as the enable switch.
+    expect(
+      toPublicInfaktOptions(resolveInfaktOptions(valid({ startDate: undefined }))).disabled,
+    ).toBe(false);
   });
 });

@@ -79,6 +79,25 @@ const CREATE_SETTLE_MS = 1500;
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * A non-blank string out of order metadata, or null.
+ *
+ * Guards against the value arriving as `null`, a number, or whitespace - none
+ * of which is a real invoice number, and any of which would otherwise make an
+ * ordinary order look backfilled.
+ */
+function readMetadataString(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string,
+): string | null {
+  const raw = metadata?.[key];
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export async function processInvoiceRow(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
   const order = (await deps.readOrder(row.order_id)) as MedusaOrderLike | null;
   if (!order) {
@@ -122,17 +141,36 @@ function guardOrderState(
   order: MedusaOrderLike,
   options: ResolvedInfaktOptions,
 ): void {
-  const {startDate} = options;
-  if (startDate === null) {
-    throw skipSignal("invoicing is disabled (no valid startDate configured)");
+  // Orders backfilled from the legacy system carry their already-issued invoice
+  // number in metadata, not in this plugin's own ledger - there was no Medusa
+  // payment behind them for `payment.captured` to ever have fired on. Reading
+  // that metadata is the only way this pipeline can recognize one, whether it
+  // was enqueued by an `order.placed` trigger at import time or manually via
+  // the admin recovery endpoint.
+  const backfilledInvoiceNumber = readMetadataString(order.metadata, "invoice_number");
+  if (backfilledInvoiceNumber) {
+    if (row.invoice_uuid) {
+      // This row already has a real inFakt invoice from THIS pipeline, and the
+      // order also carries a legacy invoice number - a state that should never
+      // occur. A human resolves the conflict rather than the row silently
+      // picking a side.
+      throw reviewSignal(
+        "this row already has an inFakt invoice from this pipeline, but the order's metadata also carries a legacy invoice_number - check for a conflict before doing anything else",
+      );
+    }
+    throw skipSignal("already invoiced outside the pipeline");
   }
 
+  const { startDate } = options;
+  // Absent means no floor: every order the pipeline otherwise sees is invoiced.
   // Compared as Warsaw calendar days, matching how the date is written on the
-  // invoice. Comparing raw timestamps would put an order placed at 01:00 Warsaw on
-  // the start date on the wrong side of the floor.
-  const placedDay = warsawDate(order.created_at ?? null);
-  if (placedDay < startDate) {
-    throw skipSignal(`order was placed on ${placedDay}, before the ${startDate} start date`);
+  // invoice, when a floor IS configured - comparing raw timestamps would put an
+  // order placed at 01:00 Warsaw on the start date on the wrong side of it.
+  if (startDate !== null) {
+    const placedDay = warsawDate(order.created_at ?? null);
+    if (placedDay < startDate) {
+      throw skipSignal(`order was placed on ${placedDay}, before the ${startDate} start date`);
+    }
   }
 
   const currency = (order.currency_code ?? "").toUpperCase();

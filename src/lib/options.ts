@@ -18,8 +18,16 @@ import type { NipExtractorOrder } from "./invoicing/nip";
  * all. See `INFAKT_WORKER_CRON` in the README.
  */
 export interface InfaktPluginOptions {
-  /** inFakt API key, sent as `X-inFakt-ApiKey`. Required. */
-  apiKey: string;
+  /**
+   * inFakt API key, sent as `X-inFakt-ApiKey`.
+   *
+   * This is the plugin's on/off switch. Leave it unset (or point it at an env
+   * var that is not set) and the plugin boots inert: no order is ever enqueued
+   * or invoiced, and the boot log says so once. Set it and the plugin is fully
+   * active. There is no separate enable flag - unwiring the credential is the
+   * supported way to turn this integration off.
+   */
+  apiKey?: string;
   /**
    * Which inFakt to talk to. Defaults to "production".
    *
@@ -28,16 +36,20 @@ export interface InfaktPluginOptions {
    */
   environment?: InfaktEnvironment;
   /**
-   * Hard floor on which orders this plugin invoices, as a strict YYYY-MM-DD
-   * calendar date. Orders placed before it are skipped.
+   * Optional floor on which orders this plugin invoices, as a strict
+   * YYYY-MM-DD calendar date. Orders placed before it are skipped.
    *
-   * Required, and required to be exactly that format. An absent or malformed
-   * value makes the whole pipeline a no-op rather than defaulting to "all of
-   * history": pointing this plugin at an existing store's back catalogue would
-   * issue thousands of real invoices and file them to KSeF, and there is no
-   * undo for either.
+   * Leave it unset to invoice every order the pipeline sees, subject to every
+   * other gate (fully paid, right currency, not canceled). Set it when this
+   * plugin is being installed onto a store that already has a back catalogue
+   * it should not touch - orders placed before the date are skipped rather
+   * than issued.
+   *
+   * When set, it must be exactly `YYYY-MM-DD` and a real calendar date. A
+   * malformed value fails loudly at boot rather than being treated as absent:
+   * a typo here must not silently turn into "invoice everything".
    */
-  startDate: string;
+  startDate?: string;
   /** Currency the plugin invoices in. Defaults to "PLN". Others are skipped. */
   currency?: string;
   /** inFakt VAT rate symbol for every line. Defaults to "23". */
@@ -93,9 +105,12 @@ export interface InfaktPluginOptions {
 
 /** Options after defaults and validation. Every field is present. */
 export interface ResolvedInfaktOptions {
-  apiKey: string;
+  /** Whether the plugin is active. False exactly when `apiKey` is absent or blank. */
+  enabled: boolean;
+  /** null when the plugin is disabled (no `apiKey` configured). */
+  apiKey: string | null;
   environment: InfaktEnvironment;
-  /** null when absent or malformed: the pipeline then no-ops, loudly. */
+  /** null when no floor was configured: every order the pipeline sees is invoiced. */
   startDate: string | null;
   currency: string;
   taxSymbol: string;
@@ -126,7 +141,7 @@ export interface InfaktPublicOptions {
   ksefRequireActive: boolean;
   ksefCustomPredicate: boolean;
   emitIssuedEvent: boolean;
-  /** True when the pipeline is inert because `startDate` is missing/invalid. */
+  /** True when the plugin is inert because no `apiKey` is configured. */
   disabled: boolean;
 }
 
@@ -138,7 +153,7 @@ const VALID_TRIGGERS = ["payment.captured", "order.placed"] as const;
 
 export const toPublicInfaktOptions = (options: ResolvedInfaktOptions): InfaktPublicOptions => ({
   currency: options.currency,
-  disabled: options.startDate === null,
+  disabled: !options.enabled,
   emitIssuedEvent: options.emitIssuedEvent,
   environment: options.environment,
   ksefCustomPredicate: options.ksefDecide !== undefined,
@@ -160,11 +175,17 @@ const optionError = (message: string): Error =>
  * merchant's checkout. Every check here is one that would otherwise surface as an
  * opaque 401/422 from inFakt, or - worse - as an invoice that should not exist.
  *
- * `startDate` is the deliberate exception to "fail at boot": an absent or
- * malformed value resolves to null and disables the pipeline instead of throwing.
- * A store that cannot boot because a date is wrong is a worse outcome than a
- * store that boots with invoicing visibly off, and both the loader log and the
- * admin UI say so in as many words.
+ * `apiKey` is the deliberate exception to "fail at boot": an absent or blank
+ * value resolves to `enabled: false` and disables the plugin instead of
+ * throwing. The plugin should simply work when it is configured and do nothing
+ * when it is not - a store that cannot boot because the credential was left
+ * unset is a worse outcome than a store that boots with invoicing visibly off,
+ * and both the loader log and the admin UI say so in as many words.
+ *
+ * `startDate`, once the arming switch this plugin used, is now an ordinary
+ * optional setting: absent means "no date floor", and a value that is present
+ * but not a strict `YYYY-MM-DD` calendar date still fails loudly, because a
+ * typo there must not silently be read as "no floor".
  */
 export const resolveInfaktOptions = (
   options?: Partial<InfaktPluginOptions>,
@@ -173,10 +194,9 @@ export const resolveInfaktOptions = (
     throw optionError("no plugin options were provided; configure it in medusa-config.ts.");
   }
 
-  const apiKey = typeof options.apiKey === "string" ? options.apiKey.trim() : "";
-  if (!apiKey) {
-    throw optionError("plugin option `apiKey` is required.");
-  }
+  const apiKeyRaw = typeof options.apiKey === "string" ? options.apiKey.trim() : "";
+  const apiKey = apiKeyRaw ? apiKeyRaw : null;
+  const enabled = apiKey !== null;
 
   const environment = options.environment ?? "production";
   if (environment !== "production" && environment !== "sandbox") {
@@ -234,7 +254,7 @@ export const resolveInfaktOptions = (
     );
   }
 
-  const {nipExtractor} = options;
+  const { nipExtractor } = options;
   if (nipExtractor !== undefined && typeof nipExtractor !== "function") {
     throw optionError("plugin option `nipExtractor` must be a function.");
   }
@@ -246,13 +266,25 @@ export const resolveInfaktOptions = (
     );
   }
 
+  // Blank and absent are the same thing here (mirroring how `apiKey` treats a
+  // blank string as unset) - only a non-blank value is held to the strict
+  // calendar-date format, and only a non-blank value that fails it throws.
   const startDateRaw = typeof options.startDate === "string" ? options.startDate.trim() : "";
-  const startDate = isCalendarDate(startDateRaw) ? startDateRaw : null;
+  let startDate: string | null = null;
+  if (startDateRaw) {
+    if (!isCalendarDate(startDateRaw)) {
+      throw optionError(
+        `plugin option \`startDate\` must be a strict YYYY-MM-DD calendar date when set (got "${String(options.startDate)}"). Leave it unset entirely to invoice every order with no date floor.`,
+      );
+    }
+    startDate = startDateRaw;
+  }
 
   return {
     apiKey,
     currency,
     emitIssuedEvent: options.emitIssuedEvent ?? true,
+    enabled,
     environment,
     ksefDecide,
     ksefMode,

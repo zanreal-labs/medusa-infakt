@@ -68,7 +68,7 @@ export default async function infaktInvoicingJob(container: MedusaContainer): Pr
   const infakt = container.resolve<InfaktModuleService>(INFAKT_MODULE);
   const options = infakt.resolvedOptions;
 
-  if (options.startDate === null) {
+  if (!options.enabled) {
     // The loader already reported this at boot. Logging it every five minutes
     // would bury everything else.
     return;

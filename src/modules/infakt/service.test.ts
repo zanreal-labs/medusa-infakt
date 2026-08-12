@@ -149,9 +149,12 @@ describe("publicOptions", () => {
     });
   });
 
-  it("reports disabled when startDate is unusable", () => {
-    const { service } = buildService({ options: { startDate: "not-a-date" } });
-    expect(service.publicOptions).toMatchObject({ disabled: true, startDate: null });
+  it("reports disabled when apiKey is absent, never because startDate is unset", () => {
+    const { service } = buildService({ options: { apiKey: undefined } });
+    expect(service.publicOptions).toMatchObject({ disabled: true });
+
+    const { service: withNoFloor } = buildService({ options: { startDate: undefined } });
+    expect(withNoFloor.publicOptions).toMatchObject({ disabled: false, startDate: null });
   });
 
   it("reports that a custom KSeF predicate is in force without exposing it", () => {
@@ -171,6 +174,11 @@ describe("apiClient", () => {
     const { service } = buildService({ options: { environment: "sandbox" } });
     expect(service.apiClient).toBeDefined();
     expect(service.resolvedOptions.environment).toBe("sandbox");
+  });
+
+  it("refuses to build one when the plugin is disabled", () => {
+    const { service } = buildService({ options: { apiKey: undefined } });
+    expect(() => service.apiClient).toThrow(/plugin is disabled/u);
   });
 });
 
@@ -355,7 +363,7 @@ describe("listDueInvoices", () => {
     expect(sql).toContain(`"status" in ('pending', 'processing')`);
     expect(sql).toContain(`"next_attempt_at" is null or "next_attempt_at" <= ?`);
     expect(sql).toContain(`"deleted_at" is null`);
-    expect(sql).toContain("order by \"created_at\" asc");
+    expect(sql).toContain('order by "created_at" asc');
     expect(sql).toContain("limit ?");
     expect(bindings[0]).toBeInstanceOf(Date);
     expect(bindings[1]).toBe(20);

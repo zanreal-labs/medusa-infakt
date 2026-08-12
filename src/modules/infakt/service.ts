@@ -122,13 +122,25 @@ export default class InfaktModuleService extends MedusaService({
    * (and the admin UI can render its configuration) in a deployment where inFakt is
    * unreachable. The API key itself is already validated at boot by the loader.
    *
+   * Throws when the plugin is disabled (no `apiKey` configured): every caller that
+   * can reach this getter - the worker, and the admin actions that adopt or
+   * re-check against inFakt - is expected to have already refused to run before
+   * getting here, so reaching this line at all means one of them did not.
+   *
    * A getter rather than a method because nothing about it is asynchronous, and
    * Medusa's lint rule - rightly - requires public service methods to return a
    * promise.
    */
   get apiClient(): InfaktClient {
+    const { apiKey } = this.options;
+    if (apiKey === null) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "medusa-infakt: the plugin is disabled (no `apiKey` configured) - there is no inFakt client to use.",
+      );
+    }
     this.client ??= new InfaktClient({
-      apiKey: this.options.apiKey,
+      apiKey,
       environment: this.options.environment,
       timeoutMs: this.options.timeoutMs,
     });

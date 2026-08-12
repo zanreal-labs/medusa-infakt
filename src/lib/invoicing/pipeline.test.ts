@@ -355,11 +355,50 @@ describe("processInvoiceRow: skips", () => {
     expect(thrown.message).toContain("canceled before");
   });
 
-  it("skips everything when startDate is unusable", async () => {
-    const { deps } = harness({ options: { startDate: "nonsense" } });
+  it("invoices an order placed long ago when no startDate floor is configured", async () => {
+    // Absent startDate is "no floor", not "disabled" - an order from well before
+    // any start date this store might configure elsewhere is still invoiced.
+    const { deps } = harness({
+      options: { startDate: undefined },
+      order: medusaOrder({ created_at: "2020-01-01T10:00:00Z" }),
+    });
+    const target = row();
+    await processInvoiceRow(target, deps);
+    expect(target.status).toBe("done");
+  });
+
+  it("skips an order already invoiced outside the pipeline (backfilled history)", async () => {
+    // Orders migrated from the legacy system carry their already-issued invoice
+    // number in metadata - there was no Medusa payment behind them for
+    // payment.captured to ever have fired on, so this is the only signal this
+    // pipeline has to recognize one.
+    const { client, deps } = harness({
+      order: medusaOrder({ metadata: { invoice_number: "FV/123/2025", invoice_source: "legacy" } }),
+    });
     const thrown = await signal(processInvoiceRow(row(), deps));
     expect(thrown.kind).toBe("skip");
-    expect(thrown.message).toContain("invoicing is disabled");
+    expect(thrown.message).toBe("already invoiced outside the pipeline");
+    expect(client.createInvoiceAsync).not.toHaveBeenCalled();
+  });
+
+  it("ignores a blank or non-string invoice_number in metadata", async () => {
+    const { deps } = harness({
+      order: medusaOrder({ metadata: { invoice_number: "   " } }),
+    });
+    const target = row();
+    await processInvoiceRow(target, deps);
+    expect(target.status).toBe("done");
+  });
+
+  it("reviews rather than skips when a row already invoiced by this pipeline conflicts with a legacy invoice_number", async () => {
+    const { deps } = harness({
+      order: medusaOrder({ metadata: { invoice_number: "FV/123/2025" } }),
+    });
+    const thrown = await signal(
+      processInvoiceRow(row({ invoice_uuid: "u-1", status: "processing" }), deps),
+    );
+    expect(thrown.kind).toBe("review");
+    expect(thrown.message).toContain("legacy invoice_number");
   });
 });
 

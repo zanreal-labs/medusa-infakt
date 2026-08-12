@@ -9,10 +9,10 @@ import type InfaktModuleService from "../../../../modules/infakt/service";
  * Manually queue an order for invoicing.
  *
  * Event delivery is at-most-once, so an order can be missed - the event bus was
- * down, the plugin was installed after the order was placed, or `startDate` was
- * raised and then lowered again. This is the recovery path, and it is safe by
- * construction: it only creates the ledger row, and the worker still applies every
- * gate (start date, currency, fully-paid, cancellation) before anything is issued.
+ * down, or the plugin was installed after the order was placed. This is the
+ * recovery path, and it is safe by construction: it only creates the ledger row,
+ * and the worker still applies every gate (start date, currency, fully-paid,
+ * cancellation, already-invoiced-elsewhere) before anything is issued.
  *
  * Queuing an order that is already queued is a no-op, not an error - the response
  * says which happened.
@@ -24,10 +24,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
   if (!orderId) {
     throw new MedusaError(MedusaError.Types.INVALID_DATA, "`order_id` is required.");
   }
-  if (infakt.resolvedOptions.startDate === null) {
+  if (!infakt.resolvedOptions.enabled) {
     throw new MedusaError(
       MedusaError.Types.NOT_ALLOWED,
-      "Invoicing is disabled: the plugin's `startDate` option is missing or is not a YYYY-MM-DD date. Set it before queuing orders.",
+      "Invoicing is disabled: the plugin's `apiKey` option is not configured. Set it before queuing orders.",
     );
   }
 

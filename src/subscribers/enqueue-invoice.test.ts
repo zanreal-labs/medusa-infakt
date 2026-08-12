@@ -98,11 +98,17 @@ describe("enqueueInvoiceSubscriber", () => {
     expect(enqueueOrder).not.toHaveBeenCalled();
   });
 
-  it("does nothing at all when startDate is unusable", async () => {
-    const { container, enqueueOrder, graph } = harness({ options: { startDate: "nope" } });
+  it("does nothing at all when the plugin is disabled (no apiKey)", async () => {
+    const { container, enqueueOrder, graph } = harness({ options: { apiKey: undefined } });
     await run(container, "payment.captured", "pay_1");
     expect(enqueueOrder).not.toHaveBeenCalled();
     expect(graph).not.toHaveBeenCalled();
+  });
+
+  it("still enqueues when startDate is unset - it is no longer an enable switch", async () => {
+    const { container, enqueueOrder } = harness({ options: { startDate: undefined } });
+    await run(container, "payment.captured", "pay_1");
+    expect(enqueueOrder).toHaveBeenCalledWith("order_1");
   });
 
   it("does nothing when the payment has no order behind it", async () => {

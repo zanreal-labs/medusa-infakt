@@ -10,11 +10,11 @@ import type { InfaktPluginOptions } from "../../../lib/options";
  * to the service, the same error would surface on the first inFakt call - in the
  * middle of a customer's checkout, wrapped in an unrelated stack trace.
  *
- * `startDate` is the one setting that does not throw. An absent or malformed value
- * disables the pipeline instead, because the alternative default - invoice
- * everything - would issue real invoices for an entire back catalogue and file
- * them to KSeF, and neither can be undone. A store that boots with invoicing
- * visibly off is recoverable; one that boots and starts issuing is not.
+ * `apiKey` is the one setting that does not throw. An absent or blank value
+ * disables the plugin instead: it boots, does nothing, and says so once. The
+ * plugin should simply work when it is configured and not work when it is not -
+ * there is no separate enable flag, and a store must never fail to boot just
+ * because the credential was left unset.
  */
 export default async function validateInfaktOptions({
   options,
@@ -22,17 +22,17 @@ export default async function validateInfaktOptions({
 }: LoaderOptions<InfaktPluginOptions>): Promise<void> {
   const resolved = resolveInfaktOptions(options);
 
-  if (resolved.startDate === null) {
+  if (!resolved.enabled) {
     logger?.error(
-      "[medusa-infakt] DISABLED: plugin option `startDate` is missing or is not a strict YYYY-MM-DD date. " +
-        "No order will be invoiced until it is set. This is a safe default, not a silent one: " +
-        "invoicing without a floor would issue real invoices for every historical order.",
+      "[medusa-infakt] DISABLED: plugin option `apiKey` is not configured. " +
+        "No order will be invoiced until it is set. This is the plugin's only enable switch.",
     );
     return;
   }
 
   logger?.info(
-    `[medusa-infakt] configured for ${resolved.environment}: invoicing ${resolved.currency} orders placed on or after ${resolved.startDate}, ` +
+    `[medusa-infakt] configured for ${resolved.environment}: invoicing ${resolved.currency} orders` +
+      `${resolved.startDate ? ` placed on or after ${resolved.startDate}` : " with no start-date floor"}, ` +
       `VAT ${resolved.taxSymbol}, triggered by ${resolved.triggerEvent}, KSeF mode ${resolved.ksefMode}` +
       `${resolved.ksefDecide ? " (overridden by a custom predicate)" : ""}.`,
   );
