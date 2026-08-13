@@ -4,6 +4,7 @@ import {
   StepResponse,
   WorkflowResponse,
 } from "@medusajs/framework/workflows-sdk";
+import type { KsefDecider, KsefMode } from "../lib/invoicing/ksef";
 import { planOperatorAction } from "../lib/invoicing/operator-actions";
 import type { OperatorAction } from "../lib/invoicing/operator-actions";
 import type { InvoiceStateRow } from "../lib/invoicing/state-machine";
@@ -33,6 +34,11 @@ export interface ApplyInvoiceActionInput {
   invoiceUuid?: string;
   /** Looked up from inFakt by the caller before adopting. */
   invoiceNumber?: string | null;
+  /**
+   * The adopted invoice's `client_tax_code`, from the same lookup. Decides the
+   * row's KSeF columns; `undefined` leaves whatever the row already carries.
+   */
+  invoiceTaxCode?: string | null;
   reason?: string;
   confirmNoDuplicate?: boolean;
 }
@@ -54,6 +60,12 @@ export interface InvoiceActionService {
   listInfaktInvoices: (filters?: Record<string, unknown>) => Promise<unknown[]>;
   updateInfaktInvoices: (data: Record<string, unknown>) => Promise<unknown>;
   resolvedOptions: { emitIssuedEvent: boolean };
+  /**
+   * Read for `ksefMode`, which an operator can change live from the Settings page -
+   * an adopt must file (or not file) by the rule in force now, not by the one that
+   * was in `medusa-config.ts` at boot.
+   */
+  getEffectiveOptions: () => Promise<{ ksefMode: KsefMode; ksefDecide?: KsefDecider }>;
 }
 
 /** The columns any action can write, so compensation can restore all of them. */
@@ -63,6 +75,9 @@ const MUTABLE_COLUMNS = [
   "completed_at",
   "invoice_number",
   "invoice_uuid",
+  "is_company",
+  "ksef_decision_reason",
+  "ksef_required",
   "last_error",
   "next_attempt_at",
   "skip_reason",
@@ -84,21 +99,28 @@ export async function applyInvoiceAction(
 ): Promise<{ result: ApplyInvoiceActionResult; compensation?: CompensationData }> {
   const [row] = (await infakt.listInfaktInvoices({
     id: [input.id],
-  })) as unknown as InvoiceStateRow[];
+  })) as unknown as (InvoiceStateRow & { order_id?: string })[];
   if (!row) {
     return { result: { applied: false, refusal: `No invoice record with id ${input.id}.` } };
   }
 
+  const options = await infakt.getEffectiveOptions();
   const plan = planOperatorAction(
     row,
     {
       action: input.action,
       confirmNoDuplicate: input.confirmNoDuplicate,
       invoiceNumber: input.invoiceNumber,
+      invoiceTaxCode: input.invoiceTaxCode,
       invoiceUuid: input.invoiceUuid,
+      orderId: row.order_id,
       reason: input.reason,
     },
-    { emitEvent: infakt.resolvedOptions.emitIssuedEvent },
+    {
+      emitEvent: infakt.resolvedOptions.emitIssuedEvent,
+      ksefDecide: options.ksefDecide,
+      ksefMode: options.ksefMode,
+    },
   );
 
   if (!plan.ok) {

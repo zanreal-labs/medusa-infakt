@@ -38,6 +38,22 @@
           "enumItems": [],
           "mappedType": "datetime"
         },
+        "adopted_evidence": {
+          "name": "adopted_evidence",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "attempts": {
           "name": "attempts",
           "type": "integer",

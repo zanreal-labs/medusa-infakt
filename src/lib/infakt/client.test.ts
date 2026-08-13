@@ -186,6 +186,31 @@ describe("InfaktClient", () => {
     expect(invoices.map((invoice) => invoice.uuid)).toEqual(["u-1", "u-2"]);
   });
 
+  it("listInvoices narrows an issue-date range with inFakt's own query filters", async () => {
+    // The reconciliation reads a window rather than the whole history, and this is
+    // the only server-side narrowing inFakt offers that helps: there is no filter
+    // for the gross total and none for the buyer's email.
+    const fetchImpl = stubFetch(() => apiJson(200, { entities: [] }));
+    await new InfaktClient({ apiKey: "KEY" }).listInvoices({
+      issuedFrom: "2026-07-01",
+      issuedTo: "2026-08-12",
+      order: "invoice_date asc",
+      taxCode: "5261040828",
+    });
+    const url = decodeURIComponent(String(fetchImpl.mock.calls[0]?.[0]));
+    expect(url).toContain("q[invoice_date_gteq]=2026-07-01");
+    expect(url).toContain("q[invoice_date_lteq]=2026-08-12");
+    expect(url).toContain("q[clean_client_nip_eq]=5261040828");
+    // `+` for the space, which is how a query string spells one.
+    expect(url).toContain("order=invoice_date+asc");
+  });
+
+  it("listInvoices sends no filter parameters when none were asked for", async () => {
+    const fetchImpl = stubFetch(() => apiJson(200, { entities: [] }));
+    await new InfaktClient({ apiKey: "KEY" }).listInvoices({ limit: 100 });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).not.toContain("q%5B");
+  });
+
   it("listInvoices returns an empty array when the envelope has no entities", async () => {
     stubFetch(() => apiJson(200, { metainfo: { total_count: 0 } }));
     await expect(new InfaktClient({ apiKey: "KEY" }).listInvoices()).resolves.toEqual([]);

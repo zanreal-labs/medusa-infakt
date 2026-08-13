@@ -30,6 +30,18 @@ const InfaktInvoice = model
      */
     adopted_at: model.dateTime().nullable(),
     /**
+     * Why the reconciliation believed this invoice belongs to this order: the
+     * signal that identified the buyer, the gross total, how far the issue date
+     * sat from the order, and whether the line positions confirmed it. JSON, and
+     * PII-free by construction - signal KINDS and numbers, never an email or a
+     * name (see `AdoptionEvidence` in `src/lib/invoicing/reconcile.ts`).
+     *
+     * Null for an invoice this plugin issued itself, and for a uuid an operator
+     * pasted in by hand: in both cases nobody inferred anything that an audit
+     * would need to re-check.
+     */
+    adopted_evidence: model.text().nullable(),
+    /**
      * Number of failed attempts. Deliberately NOT bumped by a defer (inFakt
      * still processing, order not yet fully paid), so an order that sits unpaid
      * for a week still has its full retry budget when the money lands.

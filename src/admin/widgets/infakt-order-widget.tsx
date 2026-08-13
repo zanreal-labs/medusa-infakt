@@ -119,7 +119,11 @@ export const describeKsef = (row: InfaktInvoiceRow): string => {
     return "not required";
   }
   if (row.ksef_required === true) {
-    return "pending";
+    // A terminal adopted row is the one case where "required" does not imply
+    // "queued": the document was issued elsewhere, long before this ledger knew
+    // about it, and nothing here will ever submit it. Saying "pending" would
+    // promise a filing that is not coming.
+    return row.adopted_at && row.status === "done" ? "not tracked by this plugin" : "pending";
   }
   if (row.status === "skipped") {
     return "not applicable";
