@@ -80,12 +80,22 @@ const minorToMajor = (minor: number | null): number | null => (minor === null ? 
  * "Default" or a size. Prefer the product title and qualify it with the variant
  * when both exist, so the invoice reads like a document a buyer recognises rather
  * than a database row.
+ *
+ * Some catalogues bake the product title into the variant title itself
+ * ("Bitdefender Antivirus for Mac - 1 rok / 1" for a "Bitdefender Antivirus for
+ * Mac" product); qualifying that with the full variant title would print the
+ * product name twice. When the variant title starts with the product title at a
+ * word boundary, only the remainder after the shared prefix is appended.
  */
 export function lineItemName(item: MedusaLineItemLike): string {
   const product = item.product_title?.trim();
   const variant = item.variant_title?.trim();
   const title = item.title?.trim();
   if (product && variant && variant !== product) {
+    if (variant.startsWith(product) && /^[^\p{L}\p{N}]/u.test(variant.slice(product.length))) {
+      const suffix = variant.slice(product.length).replace(/^[\s-]+/u, "").trim();
+      return suffix ? `${product} - ${suffix}` : product;
+    }
     return `${product} - ${variant}`;
   }
   return product || title || variant || "Pozycja";
