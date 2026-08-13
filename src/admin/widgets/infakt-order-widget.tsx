@@ -297,7 +297,7 @@ const RowDetail = ({
         <Field label="Buyer">{row.is_company ? "company (B2B)" : "consumer"}</Field>
         <Field label={row.status === "skipped" ? "Skipped on" : "Issued on"}>
           {formatDate(row.completed_at)}
-          {row.adopted_at ? " (adopted)" : ""}
+          {row.adopted_at ? " (adopted/imported)" : ""}
         </Field>
       </dl>
 

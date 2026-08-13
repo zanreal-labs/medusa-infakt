@@ -129,6 +129,31 @@ describe("order invoicing widget", () => {
     expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
   });
 
+  it("marks an adopted invoice and shows no actions for it", async () => {
+    wire(
+      [
+        {
+          adopted_at: new Date().toISOString(),
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: null,
+          invoice_uuid: null,
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText(/\(adopted\/imported\)/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Link invoice" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+  });
+
   it("surfaces a load failure as an inline dismissible message, not a crash", async () => {
     fetchMock.mockRejectedValue(new Error("network down"));
     render(<InfaktOrderWidget data={{ id: "order_1" }} />);
