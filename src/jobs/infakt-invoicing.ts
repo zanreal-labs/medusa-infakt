@@ -1,8 +1,14 @@
-import type { IEventBusModuleService, Logger, MedusaContainer } from "@medusajs/framework/types";
+import type {
+  INotificationModuleService,
+  IEventBusModuleService,
+  Logger,
+  MedusaContainer,
+} from "@medusajs/framework/types";
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
 import { INFAKT_MODULE } from "../modules/infakt";
 import { runHealth } from "../modules/infakt/claim-logic";
 import type InfaktModuleService from "../modules/infakt/service";
+import { buildNeedsReviewNotification } from "../lib/invoicing/notify";
 import { processInvoiceRow } from "../lib/invoicing/pipeline";
 import type { InvoiceRow, PipelineDeps } from "../lib/invoicing/pipeline";
 import { classifyOutcome } from "../lib/invoicing/state-machine";
@@ -189,10 +195,38 @@ async function drainDueRows(
       await processInvoiceRow(row, deps);
       summary.completed += 1;
     } catch (error) {
-      await recordOutcome(infakt, logger, summary, row, error);
+      await recordOutcome(container, infakt, logger, summary, row, error);
     }
   }
   return summary;
+}
+
+/**
+ * Raise a Medusa admin-feed notification for an order the pipeline parked for a
+ * human. This is the operator's alert - the order-detail widget is where they act.
+ *
+ * Deliberately swallows every failure. A host that has not wired a notification
+ * provider, or a transient failure in the module, must never turn a correctly
+ * recorded needs_review row into a failed run. The row is already persisted before
+ * this is called, so the worst case of a lost alert is a review that is found the
+ * next time the order is opened rather than the moment it is parked.
+ */
+async function notifyNeedsReview(
+  container: MedusaContainer,
+  logger: Logger,
+  input: { orderId: string; message: string; attempts: number },
+): Promise<void> {
+  try {
+    const notifications = container.resolve<INotificationModuleService>(Modules.NOTIFICATION);
+    await notifications.createNotifications(buildNeedsReviewNotification(input));
+  } catch (error) {
+    logger.warn(
+      `[${JOB_NAME}] could not raise an admin notification for order ${input.orderId} ` +
+        `(the row is still marked needs_review): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+    );
+  }
 }
 
 function buildDeps(
@@ -248,6 +282,7 @@ function buildDeps(
 
 /** Persist the classified outcome of one failed row. */
 async function recordOutcome(
+  container: MedusaContainer,
   infakt: InfaktModuleService,
   logger: Logger,
   summary: InvoicingRunSummary,
@@ -289,6 +324,14 @@ async function recordOutcome(
       id: row.id,
       last_error: outcome.message,
       status: "needs_review",
+    });
+    // Alert the operator now, after the row is safely persisted. This is the
+    // primary discovery path for a parked invoice - there is no bulk queue to
+    // hunt through; the notification deep-links to the order-detail page.
+    await notifyNeedsReview(container, logger, {
+      attempts: outcome.attempts,
+      message: outcome.message,
+      orderId: row.order_id,
     });
     return;
   }

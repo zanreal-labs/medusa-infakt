@@ -1,5 +1,5 @@
 import type { MedusaContainer } from "@medusajs/framework/types";
-import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
 import { describe, expect, it, vi } from "vitest";
 import { INFAKT_MODULE } from "../modules/infakt";
 import infaktInvoicingJob from "./infakt-invoicing";
@@ -95,5 +95,115 @@ describe("infaktInvoicingJob: the enablement gate", () => {
     expect(claimRun).not.toHaveBeenCalled();
     await infaktInvoicingJob(container);
     expect(claimRun).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The parked-invoice alert. A `needs_review` row is a failure an operator has to
+ * be told about - there is no bulk queue to hunt through - so the worker raises a
+ * Medusa admin-feed notification when it parks one, and must never let that alert's
+ * failure break the run.
+ */
+const reviewHarness = (options: { notification?: unknown } = {}) => {
+  const log = logger();
+  const updateInfaktInvoices = vi.fn(() => Promise.resolve());
+  const releaseRun = vi.fn().mockResolvedValue(true);
+  const infakt = {
+    apiClient: {},
+    claimRun: vi.fn().mockResolvedValue({ acquired: true, token: "tok" }),
+    getEffectiveEnablement: vi.fn().mockResolvedValue({ effectiveEnabled: true, reason: "active" }),
+    // One due row whose order no longer exists -> the pipeline throws a review
+    // signal -> the worker parks it and alerts.
+    listDueInvoices: vi
+      .fn()
+      .mockResolvedValue([{ attempts: 0, id: "inv_1", order_id: "order_1", status: "pending" }]),
+    releaseRun,
+    resolvedOptions: {
+      currency: "PLN",
+      emitIssuedEvent: true,
+      ksefMode: "nip-only",
+      ksefPossible: false,
+      ksefRequireActive: false,
+      nipExtractor: () => {},
+      taxSymbol: "23",
+    },
+    updateInfaktInvoices,
+  };
+  const notification = options.notification ?? {
+    createNotifications: vi.fn().mockResolvedValue({}),
+  };
+  const query = { graph: vi.fn().mockResolvedValue({ data: [] }) };
+  const container = {
+    resolve: (key: string) => {
+      if (key === ContainerRegistrationKeys.LOGGER) {
+        return log;
+      }
+      if (key === ContainerRegistrationKeys.QUERY) {
+        return query;
+      }
+      if (key === INFAKT_MODULE) {
+        return infakt;
+      }
+      if (key === Modules.NOTIFICATION) {
+        if (options.notification === "throw-on-resolve") {
+          throw new Error("notification module not registered");
+        }
+        return notification;
+      }
+      throw new Error(`unexpected resolve(${key})`);
+    },
+  } as unknown as MedusaContainer;
+  return { container, log, notification, releaseRun, updateInfaktInvoices };
+};
+
+describe("infaktInvoicingJob: the needs_review alert", () => {
+  it("parks the row and raises an admin-feed notification deep-linked to the order", async () => {
+    const notification = { createNotifications: vi.fn().mockResolvedValue({}) };
+    const { container, updateInfaktInvoices } = reviewHarness({ notification });
+
+    await infaktInvoicingJob(container);
+
+    expect(updateInfaktInvoices).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "inv_1", status: "needs_review" }),
+    );
+    expect(notification.createNotifications).toHaveBeenCalledTimes(1);
+    expect(notification.createNotifications).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "feed",
+        resource_id: "order_1",
+        resource_type: "order",
+        template: "admin-ui",
+      }),
+    );
+  });
+
+  it("still finishes the run when the notification module is not registered", async () => {
+    const { container, log, releaseRun, updateInfaktInvoices } = reviewHarness({
+      notification: "throw-on-resolve",
+    });
+
+    await expect(infaktInvoicingJob(container)).resolves.toBeUndefined();
+
+    // The row is still parked, the run still releases its claim, and the missing
+    // alert is a warning - not a thrown, unhandled failure.
+    expect(updateInfaktInvoices).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "inv_1", status: "needs_review" }),
+    );
+    expect(releaseRun).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  it("still finishes the run when creating the notification itself fails", async () => {
+    const notification = {
+      createNotifications: vi.fn().mockRejectedValue(new Error("provider down")),
+    };
+    const { container, releaseRun, updateInfaktInvoices } = reviewHarness({ notification });
+
+    await expect(infaktInvoicingJob(container)).resolves.toBeUndefined();
+
+    expect(updateInfaktInvoices).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "inv_1", status: "needs_review" }),
+    );
+    expect(releaseRun).toHaveBeenCalledTimes(1);
   });
 });
