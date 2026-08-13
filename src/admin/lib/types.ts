@@ -73,16 +73,41 @@ export interface InvoiceListResponse {
 export type EnablementReason = "env_force_disabled" | "no_api_key" | "paused" | "active";
 
 /**
- * The live picture behind the plugin's runtime enable switch, from
- * `GET /admin/infakt/settings`. Distinct from `InfaktConfig.disabled` (which is
- * fixed at boot, from `apiKey` alone): `invoicing_paused` and
- * `env_force_disabled` can both change without a restart, so this is fetched
- * fresh rather than derived from `InfaktConfig`.
+ * The raw admin-editable overrides, exactly as saved - null means "not
+ * overridden, following `medusa-config.ts`". This is what the Settings page's
+ * form fields are seeded from: seeding from `effective` instead would make the
+ * form claim an override exists the moment the boot value happens to match it.
+ */
+export interface InfaktConfigOverrideValues {
+  currency: string | null;
+  ksef_mode: "nip-only" | "all" | "never" | null;
+  trigger_event: "payment.captured" | "order.placed" | null;
+  environment: "production" | "sandbox" | null;
+}
+
+/** The merged, currently-in-effect value of every admin-editable field. */
+export interface InfaktEffectiveConfigValues {
+  currency: string;
+  ksef_mode: "nip-only" | "all" | "never";
+  trigger_event: "payment.captured" | "order.placed";
+  environment: "production" | "sandbox";
+}
+
+/**
+ * The live picture behind the plugin's runtime enable switch and every other
+ * admin-editable field, from `GET /admin/infakt/settings`. Distinct from
+ * `InfaktConfig` (which is fixed at boot, from `medusa-config.ts` alone):
+ * every field here can change without a restart, so this is fetched fresh
+ * rather than derived from `InfaktConfig`.
  */
 export interface InfaktSettings {
   invoicing_paused: boolean;
   env_force_disabled: boolean;
   api_key_configured: boolean;
+  /** Whether an `apiKey` OVERRIDE specifically is saved - distinct from `api_key_configured`. */
+  api_key_override_configured: boolean;
   effective_enabled: boolean;
   reason: EnablementReason;
+  settings: InfaktConfigOverrideValues;
+  effective: InfaktEffectiveConfigValues;
 }

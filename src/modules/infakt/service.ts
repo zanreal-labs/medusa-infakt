@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { MedusaError, MedusaService } from "@medusajs/framework/utils";
+import { encryptSecret } from "../../lib/crypto/secret-box";
 import { InfaktClient } from "../../lib/infakt";
 import type { InfaktKsefIntegration } from "../../lib/infakt";
 import {
@@ -7,6 +8,14 @@ import {
   resolveEffectiveEnablement,
 } from "../../lib/invoicing/enablement";
 import type { EffectiveEnablement } from "../../lib/invoicing/enablement";
+import {
+  mergeEffectiveOptions,
+  validateCurrencyOverride,
+  validateEnvironmentOverride,
+  validateKsefModeOverride,
+  validateTriggerEventOverride,
+} from "../../lib/invoicing/effective-config";
+import type { InfaktConfigOverrides } from "../../lib/invoicing/effective-config";
 import { resolveInfaktOptions, toPublicInfaktOptions } from "../../lib/options";
 import type {
   InfaktPluginOptions,
@@ -17,6 +26,24 @@ import { isClaimActive, staleClaimCutoff } from "./claim-logic";
 import InfaktInvoiceModel from "./models/infakt-invoice";
 import InfaktRunStateModel from "./models/infakt-run-state";
 import InfaktSettingsModel from "./models/infakt-settings";
+
+/**
+ * The fields of `POST /admin/infakt/settings` that change configuration rather
+ * than the pause switch (which `setInvoicingPausedWorkflow` still owns
+ * separately - see the note on `InfaktSettings` in the model file).
+ *
+ * `apiKey`: `undefined` leaves the persisted override untouched, `""` clears it
+ * (falls back to the boot-time `apiKey`), and a non-empty string replaces it -
+ * encrypted before it is ever written. There is no way to read a previously set
+ * value back out through this type; see `getConfigOverrides`.
+ */
+export interface ConfigOverridePatch {
+  currency?: string;
+  ksefMode?: string;
+  triggerEvent?: string;
+  environment?: string;
+  apiKey?: string;
+}
 
 /**
  * How long a claim stays valid before another run may take it over.
@@ -160,6 +187,132 @@ export default class InfaktModuleService extends MedusaService({
   }
 
   /**
+   * `resolvedOptions`, merged with whatever an operator has overridden from the
+   * Settings page.
+   *
+   * This is what every runtime decision point should read - the subscriber's
+   * trigger check, the worker's currency/KSeF gates, the admin overview's
+   * `config` field - so an edit made in the admin takes effect on the very next
+   * subscriber invocation or worker tick, not on the next restart. `resolvedOptions`
+   * itself is unaffected by this and keeps meaning exactly what it always has: the
+   * boot-time `medusa-config.ts` value.
+   */
+  async getEffectiveOptions(): Promise<ResolvedInfaktOptions> {
+    const overrides = await this.getConfigOverrides();
+    return mergeEffectiveOptions(this.options, overrides);
+  }
+
+  /**
+   * The inFakt client built from the EFFECTIVE configuration - the boot `apiKey`
+   * and `environment`, unless an operator has overridden either from the Settings
+   * page.
+   *
+   * Deliberately not memoized the way the `apiClient` getter is: an admin-set
+   * `apiKey` or `environment` override can change between calls (that is the
+   * entire point of exposing them in the Settings page), so this always rebuilds
+   * from a freshly resolved effective configuration. inFakt calls are already
+   * infrequent enough (one worker tick's batch, or one admin action) that this
+   * costs nothing worth memoizing.
+   *
+   * Throws the same way `apiClient` does when nothing - neither the boot option
+   * nor a decryptable override - resolves to a key.
+   */
+  async getApiClient(): Promise<InfaktClient> {
+    const effective = await this.getEffectiveOptions();
+    if (effective.apiKey === null) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "medusa-infakt: the plugin is disabled (no `apiKey` configured) - there is no inFakt client to use.",
+      );
+    }
+    return new InfaktClient({
+      apiKey: effective.apiKey,
+      environment: effective.environment,
+      timeoutMs: this.options.timeoutMs,
+    });
+  }
+
+  /**
+   * The raw override columns on the settings singleton, exactly as persisted -
+   * `api_key_ciphertext` included, still encrypted. Read this when the encrypted
+   * form itself is what is needed (compensation, `api_key_configured`); read
+   * `getEffectiveOptions` for the merged, usable configuration.
+   */
+  async getConfigOverrides(): Promise<InfaktConfigOverrides> {
+    const settings = await this.getSettings();
+    const row = settings as unknown as InfaktConfigOverrides;
+    return {
+      api_key_ciphertext: row.api_key_ciphertext ?? null,
+      currency: row.currency ?? null,
+      environment: row.environment ?? null,
+      ksef_mode: row.ksef_mode ?? null,
+      trigger_event: row.trigger_event ?? null,
+    };
+  }
+
+  /**
+   * Write the override columns directly, with no validation and no encryption.
+   *
+   * This is the layer `updateConfigOverrides` builds on, and the layer a
+   * workflow's compensation writes through to restore the exact previous
+   * ciphertext - re-encrypting a captured plaintext there is not an option, since
+   * nothing upstream of compensation ever holds the previous plaintext.
+   */
+  async setConfigOverridesRaw(patch: Partial<InfaktConfigOverrides>): Promise<void> {
+    await this.getSettings();
+    await this.updateInfaktSettings({ id: SETTINGS_SINGLETON_KEY, ...patch });
+  }
+
+  /**
+   * Validate, encrypt where needed, and persist an admin-editable config patch.
+   *
+   * `apiKey` is the one field that is not stored as given: a non-empty value is
+   * encrypted with `settingsEncryptionKey` first, and refused outright (a 400,
+   * not a silent no-op) when that option is not configured - writing a plaintext
+   * credential to the database is not a fallback this plugin will do quietly. An
+   * empty string clears the override rather than encrypting an empty string, so
+   * the effective configuration falls back to the boot-time `apiKey`.
+   */
+  async updateConfigOverrides(patch: ConfigOverridePatch): Promise<void> {
+    const next: Partial<InfaktConfigOverrides> = {};
+
+    if (patch.currency !== undefined) {
+      next.currency = validateCurrencyOverride(patch.currency);
+    }
+    if (patch.ksefMode !== undefined) {
+      next.ksef_mode = validateKsefModeOverride(patch.ksefMode);
+    }
+    if (patch.triggerEvent !== undefined) {
+      next.trigger_event = validateTriggerEventOverride(patch.triggerEvent);
+    }
+    if (patch.environment !== undefined) {
+      next.environment = validateEnvironmentOverride(patch.environment);
+    }
+    if (patch.apiKey !== undefined) {
+      next.api_key_ciphertext = this.encryptApiKeyOverride(patch.apiKey);
+    }
+
+    if (Object.keys(next).length > 0) {
+      await this.setConfigOverridesRaw(next);
+    }
+  }
+
+  /** `null` clears the override; a non-empty value is encrypted before it is returned. */
+  private encryptApiKeyOverride(apiKey: string): string | null {
+    const trimmed = apiKey.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (!this.options.settingsEncryptionKey) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "medusa-infakt: cannot persist an `apiKey` override - the plugin option `settingsEncryptionKey` is not configured. Set it in medusa-config.ts, or configure `apiKey` there directly instead.",
+      );
+    }
+    return encryptSecret(trimmed, this.options.settingsEncryptionKey);
+  }
+
+  /**
    * The raw-SQL escape hatch, for the two statements the generated CRUD cannot
    * express.
    *
@@ -253,17 +406,27 @@ export default class InfaktModuleService extends MedusaService({
   }
 
   /**
-   * The plugin's full runtime enablement: `apiKey`, the persisted pause switch,
-   * and the environment-level force-off, combined into one answer with one
-   * reason. Called by the subscriber on every trigger event and by the worker on
-   * every tick - `resolvedOptions.enabled` is fixed at boot, but the other two
-   * inputs are not, and checking them only once would miss every later change an
-   * admin (or an operator setting the env var) makes.
+   * The plugin's full runtime enablement: the EFFECTIVE `apiKey` (boot option or
+   * admin override), the persisted pause switch, and the environment-level
+   * force-off, combined into one answer with one reason. Called by the
+   * subscriber on every trigger event and by the worker on every tick - none of
+   * these three inputs is fixed at boot, and checking any of them only once
+   * would miss a later change an admin (or an operator setting the env var)
+   * makes.
+   *
+   * `apiKeyConfigured` reads `getEffectiveOptions`, not `resolvedOptions`, so a
+   * store with no boot-time `apiKey` at all still becomes enabled the moment an
+   * operator sets one from the Settings page - the two are equally valid ways to
+   * configure the credential, and this is the one gate every enablement check in
+   * the plugin goes through.
    */
   async getEffectiveEnablement(): Promise<EffectiveEnablement> {
-    const settings = await this.getSettings();
+    const [settings, effectiveOptions] = await Promise.all([
+      this.getSettings(),
+      this.getEffectiveOptions(),
+    ]);
     return resolveEffectiveEnablement({
-      apiKeyConfigured: this.options.enabled,
+      apiKeyConfigured: effectiveOptions.enabled,
       envForceDisabled: isInvoicingForceDisabledByEnv(),
       invoicingPaused: Boolean((settings as { invoicing_paused?: boolean }).invoicing_paused),
     });
@@ -451,11 +614,16 @@ export default class InfaktModuleService extends MedusaService({
    * not reach inFakt" and "your KSeF integration has lapsed" call for completely
    * different operator responses, and conflating them would either raise a false
    * alarm during a network blip or hide a real lapse behind one.
+   *
+   * Uses `getApiClient` (the effective, override-aware client) rather than the
+   * memoized `apiClient` getter, so this reflects an admin-set `apiKey` or
+   * `environment` override immediately, with no restart.
    */
   async verifyKsefIntegration(): Promise<InfaktKsefIntegration & { error?: string }> {
     await this.getRunState();
     try {
-      const integration = await this.apiClient.getKsefIntegration();
+      const client = await this.getApiClient();
+      const integration = await client.getKsefIntegration();
       await this.updateInfaktRunStates({
         id: RUN_STATE_SINGLETON_KEY,
         ksef_active: integration.active,

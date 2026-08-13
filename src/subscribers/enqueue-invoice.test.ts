@@ -43,7 +43,7 @@ const harness = (setup?: {
         invoicingPaused: setup?.invoicingPaused ?? false,
       }),
     ),
-    resolvedOptions,
+    getEffectiveOptions: vi.fn().mockResolvedValue(resolvedOptions),
   };
 
   const container = {

@@ -142,7 +142,9 @@ async function ensureKsefReady(
   infakt: InfaktModuleService,
   logger: Logger,
 ): Promise<void> {
-  const options = infakt.resolvedOptions;
+  // Effective, not boot-only: an admin-set `ksef.mode` override changes whether
+  // this check applies at all, on the very next tick.
+  const options = await infakt.getEffectiveOptions();
   if (!(options.ksefPossible && options.ksefRequireActive)) {
     return;
   }
@@ -185,7 +187,7 @@ async function drainDueRows(
 ): Promise<InvoicingRunSummary> {
   const summary = emptySummary();
   const rows = (await infakt.listDueInvoices(BATCH_LIMIT)) as unknown as InvoiceRow[];
-  const deps = buildDeps(container, infakt, logger);
+  const deps = await buildDeps(container, infakt, logger);
 
   for (const row of rows) {
     summary.processed += 1;
@@ -229,14 +231,19 @@ async function notifyNeedsReview(
   }
 }
 
-function buildDeps(
+async function buildDeps(
   container: MedusaContainer,
   infakt: InfaktModuleService,
   logger: Logger,
-): PipelineDeps {
-  const options = infakt.resolvedOptions;
+): Promise<PipelineDeps> {
+  // Effective, not boot-only: `currency`, `ksefMode` and the API client itself
+  // all follow whatever an operator last saved on the Settings page.
+  const [options, client] = await Promise.all([
+    infakt.getEffectiveOptions(),
+    infakt.getApiClient(),
+  ]);
   return {
-    client: infakt.apiClient,
+    client,
     async emitIssued(payload) {
       const eventBus = container.resolve<IEventBusModuleService>(Modules.EVENT_BUS);
       await eventBus.emit({ data: payload, name: "infakt.invoice.issued" });

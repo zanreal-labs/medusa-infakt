@@ -1,15 +1,17 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { isInCrashWindow } from "../../../lib/invoicing/operator-actions";
 import type { InvoiceStateRow } from "../../../lib/invoicing/state-machine";
+import { toPublicInfaktOptions } from "../../../lib/options";
 import { INFAKT_MODULE } from "../../../modules/infakt";
 import type InfaktModuleService from "../../../modules/infakt/service";
 
 /**
  * GET /admin/infakt
  *
- * Everything the Invoicing page needs in one round trip: the resolved
- * configuration, the worker's run state (including the KSeF integration's health),
- * and a count per invoice status.
+ * Everything the Invoicing page needs in one round trip: the EFFECTIVE
+ * configuration (boot options, overridden by whatever an operator has since
+ * saved on the Settings page), the worker's run state (including the KSeF
+ * integration's health), and a count per invoice status.
  *
  * No secret material is returned - the configuration goes through
  * `toPublicInfaktOptions`, which does not carry `apiKey`.
@@ -17,9 +19,10 @@ import type InfaktModuleService from "../../../modules/infakt/service";
 export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void> {
   const infakt = req.scope.resolve<InfaktModuleService>(INFAKT_MODULE);
 
-  const [runState, invoices] = await Promise.all([
+  const [runState, invoices, effectiveOptions] = await Promise.all([
     infakt.getRunState(),
     infakt.listInfaktInvoices({}, { take: 10_000 }),
+    infakt.getEffectiveOptions(),
   ]);
 
   const rows = invoices as unknown as (InvoiceStateRow & { status: string })[];
@@ -37,7 +40,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
   }
 
   res.json({
-    config: infakt.publicOptions,
+    config: toPublicInfaktOptions(effectiveOptions),
     counts,
     crash_window_count: crashWindow,
     run_state: runState,

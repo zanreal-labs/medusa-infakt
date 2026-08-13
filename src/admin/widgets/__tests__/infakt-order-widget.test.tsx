@@ -16,10 +16,18 @@ const InfaktOrderWidget = (await import("../infakt-order-widget")).default;
 
 const settings = (over: Partial<InfaktSettings> = {}): InfaktSettings => ({
   api_key_configured: true,
+  api_key_override_configured: false,
+  effective: {
+    currency: "PLN",
+    environment: "production",
+    ksef_mode: "nip-only",
+    trigger_event: "payment.captured",
+  },
   effective_enabled: false,
   env_force_disabled: false,
   invoicing_paused: true,
   reason: "paused",
+  settings: { currency: null, environment: null, ksef_mode: null, trigger_event: null },
   ...over,
 });
 

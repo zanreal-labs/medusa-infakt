@@ -20,8 +20,9 @@ import type InfaktModuleService from "../../../../modules/infakt/service";
  */
 export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<void> {
   const infakt = req.scope.resolve<InfaktModuleService>(INFAKT_MODULE);
+  const effectiveOptions = await infakt.getEffectiveOptions();
 
-  if (!infakt.resolvedOptions.enabled) {
+  if (!effectiveOptions.enabled) {
     res.json({
       active: false,
       checked_at: new Date().toISOString(),

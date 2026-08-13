@@ -12,9 +12,11 @@ vi.mock("../../../../../workflows/apply-invoice-action", () => ({
 }));
 
 const service = (overrides: Record<string, unknown> = {}) => ({
-  apiClient: { getInvoice: vi.fn().mockResolvedValue({ number: "7/07/2026", uuid: "u-9" }) },
+  getApiClient: vi.fn().mockResolvedValue({
+    getInvoice: vi.fn().mockResolvedValue({ number: "7/07/2026", uuid: "u-9" }),
+  }),
+  getEffectiveOptions: vi.fn().mockResolvedValue({ emitIssuedEvent: true, enabled: true }),
   listInfaktInvoices: vi.fn().mockResolvedValue([{ id: "inv_1", status: "processing" }]),
-  resolvedOptions: { emitIssuedEvent: true, enabled: true },
   ...overrides,
 });
 
@@ -73,15 +75,14 @@ describe("POST /admin/infakt/invoices/:id", () => {
   });
 
   it("reads the adopted invoice from inFakt BEFORE the link is written", async () => {
-    const svc = service();
+    const getInvoice = vi.fn().mockResolvedValue({ number: "7/07/2026", uuid: "u-9" });
+    const svc = service({ getApiClient: vi.fn().mockResolvedValue({ getInvoice }) });
     const res = mockResponse();
     await POST(request(svc, { action: "adopt", invoice_uuid: " u-9 " }), res);
-    expect(svc.apiClient.getInvoice).toHaveBeenCalledWith("u-9");
+    expect(getInvoice).toHaveBeenCalledWith("u-9");
     expect(run.mock.calls[0][0].input.invoiceNumber).toBe("7/07/2026");
     // The order matters: a uuid that does not exist must never reach the write.
-    expect(svc.apiClient.getInvoice.mock.invocationCallOrder[0]).toBeLessThan(
-      run.mock.invocationCallOrder[0],
-    );
+    expect(getInvoice.mock.invocationCallOrder[0]).toBeLessThan(run.mock.invocationCallOrder[0]);
   });
 
   it("requires a uuid to adopt", async () => {
@@ -93,11 +94,11 @@ describe("POST /admin/infakt/invoices/:id", () => {
 
   it("reports a uuid inFakt does not know as invalid input, not a server error", async () => {
     const svc = service({
-      apiClient: {
+      getApiClient: vi.fn().mockResolvedValue({
         getInvoice: vi
           .fn()
           .mockRejectedValue(new InfaktApiError({ httpStatus: 404, message: "not found" })),
-      },
+      }),
     });
     await expect(
       POST(request(svc, { action: "adopt", invoice_uuid: "u-nope" }), mockResponse()),
@@ -107,11 +108,11 @@ describe("POST /admin/infakt/invoices/:id", () => {
 
   it("does not swallow a non-404 failure while reading the adopted invoice", async () => {
     const svc = service({
-      apiClient: {
+      getApiClient: vi.fn().mockResolvedValue({
         getInvoice: vi
           .fn()
           .mockRejectedValue(new InfaktApiError({ httpStatus: 503, message: "unavailable" })),
-      },
+      }),
     });
     await expect(
       POST(request(svc, { action: "adopt", invoice_uuid: "u-9" }), mockResponse()),
@@ -129,9 +130,11 @@ describe("POST /admin/infakt/invoices/:id", () => {
   });
 
   it("refuses to adopt when the plugin is disabled, with a 409 rather than a thrown error", async () => {
-    // apiClient throws when the plugin is disabled; this route must catch that
-    // before the getter is ever touched, not let it become an uncaught error.
-    const svc = service({ resolvedOptions: { emitIssuedEvent: true, enabled: false } });
+    // The API client throws when the plugin is disabled; this route must catch
+    // that before the getter is ever touched, not let it become an uncaught error.
+    const svc = service({
+      getEffectiveOptions: vi.fn().mockResolvedValue({ emitIssuedEvent: true, enabled: false }),
+    });
     const res = mockResponse();
     await POST(request(svc, { action: "adopt", invoice_uuid: "u-9" }), res);
     expect(res.status).toHaveBeenCalledWith(409);
@@ -143,17 +146,20 @@ describe("POST /admin/infakt/invoices/:id", () => {
   });
 
   it("still allows retry, clear and skip when the plugin is disabled - only adopt touches inFakt", async () => {
-    const svc = service({ resolvedOptions: { emitIssuedEvent: true, enabled: false } });
+    const svc = service({
+      getEffectiveOptions: vi.fn().mockResolvedValue({ emitIssuedEvent: true, enabled: false }),
+    });
     await POST(request(svc, { action: "retry" }), mockResponse());
     expect(run).toHaveBeenCalled();
   });
 
   it("does not read inFakt for any action other than adopt", async () => {
-    const svc = service();
+    const getApiClient = vi.fn();
+    const svc = service({ getApiClient });
     for (const action of ["retry", "clear", "skip"]) {
       await POST(request(svc, { action, confirm_no_duplicate: true, reason: "x" }), mockResponse());
     }
-    expect(svc.apiClient.getInvoice).not.toHaveBeenCalled();
+    expect(getApiClient).not.toHaveBeenCalled();
   });
 
   it("tolerates a missing body", async () => {

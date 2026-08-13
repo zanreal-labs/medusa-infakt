@@ -48,7 +48,10 @@ export default async function enqueueInvoiceSubscriber({
 }: SubscriberArgs<{ id: string }>): Promise<void> {
   const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
   const infakt = container.resolve<InfaktModuleService>(INFAKT_MODULE);
-  const options = infakt.resolvedOptions;
+  // Effective, not boot-only: an operator can change `triggerEvent` from the
+  // Settings page, and it must take effect on the very next event, not the next
+  // restart.
+  const options = await infakt.getEffectiveOptions();
 
   if (event.name !== options.triggerEvent) {
     return;

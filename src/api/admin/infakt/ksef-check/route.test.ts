@@ -4,7 +4,7 @@ import { mockResponse } from "../__tests__/mock-response";
 import { POST } from "./route";
 
 const service = (overrides: Record<string, unknown> = {}) => ({
-  resolvedOptions: { enabled: true },
+  getEffectiveOptions: vi.fn().mockResolvedValue({ enabled: true }),
   verifyKsefIntegration: vi.fn().mockResolvedValue({ active: true }),
   ...overrides,
 });
@@ -38,10 +38,14 @@ describe("POST /admin/infakt/ksef-check", () => {
   });
 
   it("never touches verifyKsefIntegration when the plugin is disabled, and answers 200", async () => {
-    // apiClient throws when disabled; verifyKsefIntegration happens to swallow that,
-    // but this route guards up front rather than depending on that incidentally.
+    // The API client throws when disabled; verifyKsefIntegration happens to
+    // swallow that, but this route guards up front rather than depending on that
+    // incidentally.
     const verifyKsefIntegration = vi.fn();
-    const svc = service({ resolvedOptions: { enabled: false }, verifyKsefIntegration });
+    const svc = service({
+      getEffectiveOptions: vi.fn().mockResolvedValue({ enabled: false }),
+      verifyKsefIntegration,
+    });
     const res = mockResponse();
     await POST(request(svc), res);
     expect(verifyKsefIntegration).not.toHaveBeenCalled();

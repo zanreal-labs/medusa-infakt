@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { encryptSecret } from "../../lib/crypto/secret-box";
 import { resolveInfaktOptions } from "../../lib/options";
 import type { InfaktPluginOptions } from "../../lib/options";
 import InfaktModuleService, {
@@ -130,7 +131,15 @@ const buildService = (config?: {
   const internals = service as unknown as { options: unknown; client?: unknown };
   internals.options = resolveInfaktOptions(validOptions(config?.options));
   if (config?.client) {
+    // `apiClient` (the memoized, boot-only getter) reads the private `client`
+    // field directly. `getApiClient` (the effective, override-aware method) is
+    // deliberately never memoized - see its doc comment - so it is stubbed
+    // separately here rather than reading that field, to keep both test seams
+    // truthful about what each real method does.
     internals.client = config.client;
+    Object.assign(service, {
+      getApiClient: () => Promise.resolve(config.client),
+    });
   }
 
   return { invoices, rawCalls, runState, service, settings };
@@ -527,6 +536,155 @@ describe("setInvoicingPaused", () => {
   });
 });
 
+describe("getConfigOverrides / setConfigOverridesRaw", () => {
+  it("reports every column null when the settings row has none set", async () => {
+    const { service } = buildService();
+    await expect(service.getConfigOverrides()).resolves.toEqual({
+      api_key_ciphertext: null,
+      currency: null,
+      environment: null,
+      ksef_mode: null,
+      trigger_event: null,
+    });
+  });
+
+  it("round-trips whatever setConfigOverridesRaw writes, with no validation and no encryption", async () => {
+    const { service, settings } = buildService();
+    await service.setConfigOverridesRaw({ currency: "eur-not-validated", ksef_mode: "all" });
+    expect(settings.rows[0]).toMatchObject({ currency: "eur-not-validated", ksef_mode: "all" });
+    await expect(service.getConfigOverrides()).resolves.toMatchObject({
+      currency: "eur-not-validated",
+      ksef_mode: "all",
+    });
+  });
+
+  it("mints the settings singleton first, if it does not exist yet", async () => {
+    const { service, settings } = buildService();
+    await service.setConfigOverridesRaw({ currency: "EUR" });
+    expect(settings.rows).toHaveLength(1);
+  });
+});
+
+describe("updateConfigOverrides", () => {
+  it("validates and persists currency, ksefMode, triggerEvent and environment", async () => {
+    const { service, settings } = buildService();
+    await service.updateConfigOverrides({
+      currency: "eur",
+      environment: "sandbox",
+      ksefMode: "all",
+      triggerEvent: "order.placed",
+    });
+    expect(settings.rows[0]).toMatchObject({
+      currency: "EUR",
+      environment: "sandbox",
+      ksef_mode: "all",
+      trigger_event: "order.placed",
+    });
+  });
+
+  it("rejects an invalid value for any field, writing nothing", async () => {
+    const { service, settings } = buildService();
+    await expect(service.updateConfigOverrides({ ksefMode: "sometimes" })).rejects.toThrow(
+      /ksef_mode/u,
+    );
+    expect(settings.rows).toHaveLength(0);
+  });
+
+  it("leaves fields not present in the patch untouched", async () => {
+    const { service, settings } = buildService({
+      settings: [{ currency: "PLN", id: SETTINGS_SINGLETON_KEY, invoicing_paused: true }],
+    });
+    await service.updateConfigOverrides({ ksefMode: "never" });
+    expect(settings.rows[0]).toMatchObject({ currency: "PLN", ksef_mode: "never" });
+  });
+
+  it("encrypts a non-empty apiKey with settingsEncryptionKey before persisting it", async () => {
+    const { service, settings } = buildService({
+      options: { settingsEncryptionKey: "encryption-key" },
+    });
+    await service.updateConfigOverrides({ apiKey: "admin-set-key" });
+    const ciphertext = settings.rows[0]?.api_key_ciphertext as string;
+    expect(ciphertext).toBeDefined();
+    expect(ciphertext).not.toContain("admin-set-key");
+  });
+
+  it("refuses to persist an apiKey override when settingsEncryptionKey is not configured", async () => {
+    const { service, settings } = buildService();
+    await expect(service.updateConfigOverrides({ apiKey: "admin-set-key" })).rejects.toThrow(
+      /settingsEncryptionKey/u,
+    );
+    expect(settings.rows).toHaveLength(0);
+  });
+
+  it("clears the apiKey override on an empty string, with no encryption key required", async () => {
+    const { service, settings } = buildService({
+      settings: [{ api_key_ciphertext: "previously-encrypted", id: SETTINGS_SINGLETON_KEY }],
+    });
+    await service.updateConfigOverrides({ apiKey: "" });
+    expect(settings.rows[0]?.api_key_ciphertext).toBeNull();
+  });
+
+  it("does nothing at all when the patch is empty", async () => {
+    const { service, settings } = buildService();
+    await service.updateConfigOverrides({});
+    expect(settings.rows).toHaveLength(0);
+  });
+});
+
+describe("getEffectiveOptions", () => {
+  it("reproduces the boot configuration when no override has been saved", async () => {
+    const { service } = buildService({ options: { currency: "EUR" } });
+    const effective = await service.getEffectiveOptions();
+    expect(effective).toEqual(service.resolvedOptions);
+  });
+
+  it("reflects a saved override on the very next call, with no restart", async () => {
+    const { service } = buildService();
+    await service.updateConfigOverrides({ currency: "eur" });
+    const effective = await service.getEffectiveOptions();
+    expect(effective.currency).toBe("EUR");
+  });
+
+  it("decrypts a saved apiKey override and reports the plugin as enabled from it alone", async () => {
+    const { service } = buildService({
+      options: { apiKey: undefined, settingsEncryptionKey: "encryption-key" },
+    });
+    await service.updateConfigOverrides({ apiKey: "admin-set-key" });
+    const effective = await service.getEffectiveOptions();
+    expect(effective.apiKey).toBe("admin-set-key");
+    expect(effective.enabled).toBe(true);
+  });
+});
+
+describe("getApiClient", () => {
+  it("builds a client from the effective apiKey, not just the boot one", async () => {
+    const { service } = buildService({
+      options: { apiKey: undefined, settingsEncryptionKey: "encryption-key" },
+    });
+    await service.updateConfigOverrides({ apiKey: "admin-set-key" });
+    await expect(service.getApiClient()).resolves.toBeDefined();
+  });
+
+  it("refuses when neither a boot apiKey nor a decryptable override exists", async () => {
+    const { service } = buildService({ options: { apiKey: undefined } });
+    await expect(service.getApiClient()).rejects.toThrow(/plugin is disabled/u);
+  });
+
+  it("falls back to the boot apiKey when the override cannot be decrypted", async () => {
+    const { service } = buildService({
+      options: { apiKey: "boot-key", settingsEncryptionKey: "current-key" },
+      settings: [
+        {
+          api_key_ciphertext: encryptSecret("admin-set-key", "a-different-key"),
+          id: SETTINGS_SINGLETON_KEY,
+        },
+      ],
+    });
+    await expect(service.getApiClient()).resolves.toBeDefined();
+    await expect(service.getEffectiveOptions()).resolves.toMatchObject({ apiKey: "boot-key" });
+  });
+});
+
 describe("getEffectiveEnablement", () => {
   const ENV_VAR = "INFAKT_INVOICING_DISABLED";
   const originalValue = process.env[ENV_VAR];
@@ -564,6 +722,19 @@ describe("getEffectiveEnablement", () => {
     await expect(service.getEffectiveEnablement()).resolves.toMatchObject({
       effectiveEnabled: false,
       reason: "no_api_key",
+    });
+  });
+
+  it("reports apiKeyConfigured from an admin-set override alone, with no boot apiKey", async () => {
+    const { service } = buildService({
+      options: { apiKey: undefined, settingsEncryptionKey: "encryption-key" },
+      settings: [{ id: SETTINGS_SINGLETON_KEY, invoicing_paused: false }],
+    });
+    await service.updateConfigOverrides({ apiKey: "admin-set-key" });
+    await expect(service.getEffectiveEnablement()).resolves.toMatchObject({
+      apiKeyConfigured: true,
+      effectiveEnabled: true,
+      reason: "active",
     });
   });
 

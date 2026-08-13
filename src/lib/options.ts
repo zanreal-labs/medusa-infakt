@@ -101,6 +101,23 @@ export interface InfaktPluginOptions {
   emitIssuedEvent?: boolean;
   /** Per-request timeout for inFakt calls, in ms. Defaults to 60_000. */
   timeoutMs?: number;
+  /**
+   * Key material for encrypting an admin-set `apiKey` override at rest.
+   *
+   * `currency`, `ksef.mode`, `triggerEvent`, `environment` and `apiKey` can all be
+   * overridden live from the Settings page (see `InfaktSettings` and
+   * `src/lib/invoicing/effective-config.ts`) without a redeploy. Every override
+   * except `apiKey` is operational configuration, not a secret, so it is stored as
+   * plain text. `apiKey` is different - it is the same credential this option
+   * carries here - so an override is encrypted with this key before it is
+   * persisted (AES-256-GCM, Node's built-in `crypto`, no new dependency).
+   *
+   * Leave it unset and the admin UI can still change every OTHER setting; it
+   * refuses only the one action that would write a plaintext credential to the
+   * database (`POST /admin/infakt/settings` with a non-empty `api_key`), with a
+   * message naming this option. Read it from an env var, exactly like `apiKey`.
+   */
+  settingsEncryptionKey?: string;
 }
 
 /** Options after defaults and validation. Every field is present. */
@@ -122,6 +139,8 @@ export interface ResolvedInfaktOptions {
   nipExtractor: (order: NipExtractorOrder) => string | undefined;
   emitIssuedEvent: boolean;
   timeoutMs: number;
+  /** null when unset: no admin-set `apiKey` override can be persisted. */
+  settingsEncryptionKey: string | null;
 }
 
 /**
@@ -148,8 +167,14 @@ export interface InfaktPublicOptions {
 export const DEFAULT_CURRENCY = "PLN";
 export const DEFAULT_TAX_SYMBOL = "23";
 export const DEFAULT_TIMEOUT_MS = 60_000;
-const VALID_KSEF_MODES: readonly KsefMode[] = ["nip-only", "all", "never"];
-const VALID_TRIGGERS = ["payment.captured", "order.placed"] as const;
+/**
+ * Exported so `src/lib/invoicing/effective-config.ts` validates an admin-set
+ * override against the exact same list this boot-time check uses - there must be
+ * one definition of "a valid `ksef.mode`", not two that can drift apart.
+ */
+export const VALID_KSEF_MODES: readonly KsefMode[] = ["nip-only", "all", "never"];
+/** See the note on `VALID_KSEF_MODES` - shared with the admin-editable override. */
+export const VALID_TRIGGERS = ["payment.captured", "order.placed"] as const;
 
 export const toPublicInfaktOptions = (options: ResolvedInfaktOptions): InfaktPublicOptions => ({
   currency: options.currency,
@@ -259,6 +284,16 @@ export const resolveInfaktOptions = (
     throw optionError("plugin option `nipExtractor` must be a function.");
   }
 
+  // Blank and absent are the same "not configured" as every other optional string
+  // option here - a key of `"   "` would otherwise derive from whitespace, which
+  // is never what an operator meant.
+  const settingsEncryptionKeyRaw =
+    typeof options.settingsEncryptionKey === "string" ? options.settingsEncryptionKey.trim() : "";
+  if (options.settingsEncryptionKey !== undefined && !settingsEncryptionKeyRaw) {
+    throw optionError("plugin option `settingsEncryptionKey` must not be blank when provided.");
+  }
+  const settingsEncryptionKey = settingsEncryptionKeyRaw ? settingsEncryptionKeyRaw : null;
+
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw optionError(
@@ -291,6 +326,7 @@ export const resolveInfaktOptions = (
     ksefPossible: ksefPossible(ksefMode, ksefDecide),
     ksefRequireActive: resolveRequireActive(options.ksef?.requireActive, environment),
     nipExtractor: nipExtractor ?? defaultNipExtractor,
+    settingsEncryptionKey,
     startDate,
     taxSymbol,
     timeoutMs,

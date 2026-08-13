@@ -109,16 +109,10 @@ const reviewHarness = (options: { notification?: unknown } = {}) => {
   const updateInfaktInvoices = vi.fn(() => Promise.resolve());
   const releaseRun = vi.fn().mockResolvedValue(true);
   const infakt = {
-    apiClient: {},
     claimRun: vi.fn().mockResolvedValue({ acquired: true, token: "tok" }),
+    getApiClient: vi.fn().mockResolvedValue({}),
     getEffectiveEnablement: vi.fn().mockResolvedValue({ effectiveEnabled: true, reason: "active" }),
-    // One due row whose order no longer exists -> the pipeline throws a review
-    // signal -> the worker parks it and alerts.
-    listDueInvoices: vi
-      .fn()
-      .mockResolvedValue([{ attempts: 0, id: "inv_1", order_id: "order_1", status: "pending" }]),
-    releaseRun,
-    resolvedOptions: {
+    getEffectiveOptions: vi.fn().mockResolvedValue({
       currency: "PLN",
       emitIssuedEvent: true,
       ksefMode: "nip-only",
@@ -126,7 +120,13 @@ const reviewHarness = (options: { notification?: unknown } = {}) => {
       ksefRequireActive: false,
       nipExtractor: () => {},
       taxSymbol: "23",
-    },
+    }),
+    // One due row whose order no longer exists -> the pipeline throws a review
+    // signal -> the worker parks it and alerts.
+    listDueInvoices: vi
+      .fn()
+      .mockResolvedValue([{ attempts: 0, id: "inv_1", order_id: "order_1", status: "pending" }]),
+    releaseRun,
     updateInfaktInvoices,
   };
   const notification = options.notification ?? {

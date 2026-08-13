@@ -102,6 +102,9 @@ module.exports = defineConfig({
         currency: "PLN",
         taxSymbol: "23",
         ksef: { mode: "nip-only", requireActive: true },
+        // Optional. Required only before an operator can save an apiKey
+        // override from Settings -> inFakt - see "Live overrides" below.
+        settingsEncryptionKey: process.env.INFAKT_SETTINGS_ENCRYPTION_KEY,
       },
     },
   ],
@@ -130,20 +133,26 @@ real inFakt trial account is the more dependable path.** If you do:
 Passed via `medusa-config.ts` `plugins[].options`. The single object cascades to every
 module the plugin registers (there is one: `infakt`).
 
-| Option               | Type                                   | Default              | Notes                                                                                                                                          |
-| -------------------- | -------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apiKey`             | `string`                               | -                    | **The enable switch.** inFakt API key, sent as `X-inFakt-ApiKey`. Absent or blank leaves the plugin inert; see below. Read it from an env var. |
-| `environment`        | `"production" \| "sandbox"`            | `"production"`       | See the sandbox note above.                                                                                                                    |
-| `startDate`          | `string`                               | -                    | **Optional**, strict `YYYY-MM-DD`. Orders placed before it are skipped. Absent means no floor. See below.                                      |
-| `currency`           | `string`                               | `"PLN"`              | Orders in any other currency are skipped with a reason.                                                                                        |
-| `taxSymbol`          | `string`                               | `"23"`               | inFakt VAT rate symbol applied to every line.                                                                                                  |
-| `triggerEvent`       | `"payment.captured" \| "order.placed"` | `"payment.captured"` | Which event queues an order. Medusa has no `order.paid` event.                                                                                 |
-| `ksef.mode`          | `"nip-only" \| "all" \| "never"`       | `"nip-only"`         | Who gets filed. `never` is for development only.                                                                                               |
-| `ksef.requireActive` | `boolean`                              | `true` in production | Verify the account's KSeF integration and refuse to run when it is not active.                                                                 |
-| `ksef.decide`        | `(input) => boolean`                   | -                    | Per-invoice predicate. Overrides `mode` entirely, including `never`.                                                                           |
-| `nipExtractor`       | `(order) => string \| undefined`       | see below            | Where to find the buyer's NIP.                                                                                                                 |
-| `emitIssuedEvent`    | `boolean`                              | `true`               | Emit `infakt.invoice.issued` once an invoice is issued.                                                                                        |
-| `timeoutMs`          | `number`                               | `60000`              | Per-request timeout for inFakt calls.                                                                                                          |
+| Option                  | Type                                   | Default              | Notes                                                                                                                                          |
+| ----------------------- | -------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiKey`                | `string`                               | -                    | **The enable switch.** inFakt API key, sent as `X-inFakt-ApiKey`. Absent or blank leaves the plugin inert; see below. Read it from an env var. |
+| `environment`           | `"production" \| "sandbox"`            | `"production"`       | See the sandbox note above.                                                                                                                    |
+| `startDate`             | `string`                               | -                    | **Optional**, strict `YYYY-MM-DD`. Orders placed before it are skipped. Absent means no floor. See below.                                      |
+| `currency`              | `string`                               | `"PLN"`              | Orders in any other currency are skipped with a reason.                                                                                        |
+| `taxSymbol`             | `string`                               | `"23"`               | inFakt VAT rate symbol applied to every line.                                                                                                  |
+| `triggerEvent`          | `"payment.captured" \| "order.placed"` | `"payment.captured"` | Which event queues an order. Medusa has no `order.paid` event.                                                                                 |
+| `ksef.mode`             | `"nip-only" \| "all" \| "never"`       | `"nip-only"`         | Who gets filed. `never` is for development only.                                                                                               |
+| `ksef.requireActive`    | `boolean`                              | `true` in production | Verify the account's KSeF integration and refuse to run when it is not active.                                                                 |
+| `ksef.decide`           | `(input) => boolean`                   | -                    | Per-invoice predicate. Overrides `mode` entirely, including `never`.                                                                           |
+| `nipExtractor`          | `(order) => string \| undefined`       | see below            | Where to find the buyer's NIP.                                                                                                                 |
+| `emitIssuedEvent`       | `boolean`                              | `true`               | Emit `infakt.invoice.issued` once an invoice is issued.                                                                                        |
+| `timeoutMs`             | `number`                               | `60000`              | Per-request timeout for inFakt calls.                                                                                                          |
+| `settingsEncryptionKey` | `string`                               | -                    | Encrypts an admin-set `apiKey` override at rest. Required before one can be saved from Settings -> inFakt; see below. Read it from an env var. |
+
+`apiKey`, `environment`, `currency`, `triggerEvent` and `ksef.mode` can all be overridden
+live from **Settings -> inFakt** without a redeploy - see
+[Live overrides](#live-overrides-currency-ksefmode-triggerevent-environment-apikey) below.
+Every other option in this table stays `medusa-config.ts`-only.
 
 Every option is validated in the module loader, so a misconfiguration is a boot failure
 with a precise message rather than an opaque 401 or 422 in the middle of a customer's
@@ -167,9 +176,9 @@ to stay off until an operator deliberately turns it on. Two more layers sit on t
 just at boot, because both of these CAN change without a restart):
 
 1. **The pause switch** (`invoicing_paused`, in the `InfaktSettings` table). Editable
-   live from the Invoicing page or the Settings widget. **Defaults to `true`** on a
-   fresh install - a store that already has `apiKey` configured does not start
-   issuing invoices the moment it boots. An operator resumes it explicitly.
+   live from **Settings -> inFakt** in the admin. **Defaults to `true`** on a fresh
+   install - a store that already has `apiKey` configured does not start issuing
+   invoices the moment it boots. An operator resumes it explicitly.
 2. **`INFAKT_INVOICING_DISABLED`** (environment variable; `1`, `true` or `yes`,
    case-insensitively). A hard, operator-controlled force-off that cannot be
    released from inside the admin - it overrides everything, including an admin
@@ -179,9 +188,42 @@ just at boot, because both of these CAN change without a restart):
 The combined answer - `effectiveEnabled = apiKeyPresent && !invoicingPaused &&
 !envForceDisabled` - is what the subscriber and the worker actually check. `GET
 /admin/infakt/settings` reports it, along with which of the three is responsible
-(`reason`: `active`, `no_api_key`, `paused`, or `env_force_disabled`), and
-`POST /admin/infakt/settings { "invoicing_paused": boolean }` is the only way to
-flip the pause switch.
+(`reason`: `active`, `no_api_key`, `paused`, or `env_force_disabled`).
+
+### Live overrides: `currency`, `ksef.mode`, `triggerEvent`, `environment`, `apiKey`
+
+`invoicing_paused` is not the only field this plugin lets an operator change without a
+redeploy. **Settings -> inFakt** can also override `currency`, `ksef.mode`, `triggerEvent`,
+`environment` and `apiKey` - every one of these plugin options, except `startDate`,
+`taxSymbol`, `ksef.requireActive`, `ksef.decide`, `nipExtractor`, `emitIssuedEvent` and
+`timeoutMs`, which stay `medusa-config.ts`-only.
+
+Each override is a nullable column on the same `InfaktSettings` singleton row as the pause
+switch. Null means "not overridden - use the `medusa-config.ts` value", so **shipping this
+onto an existing install changes nothing** until an operator opens the Settings page and
+saves a field on purpose. Once saved, the override wins outright and is read fresh on every
+subscriber invocation and every worker tick - see `mergeEffectiveOptions` in
+`src/lib/invoicing/effective-config.ts`.
+
+`POST /admin/infakt/settings` accepts any subset of `invoicing_paused`, `currency`,
+`ksef_mode`, `trigger_event`, `environment` and `api_key` - only the fields present in the
+body are written. `GET /admin/infakt/settings` reports both `settings` (the raw override,
+null where unset) and `effective` (the merged, currently-in-effect value).
+
+**`apiKey` is handled differently from the other four.** It is a credential, not
+configuration, so an override is encrypted (AES-256-GCM, via Node's built-in `crypto`, no
+new dependency) with the plugin's `settingsEncryptionKey` option before it is ever written
+to the database, and it is never read back by any admin route - `GET
+/admin/infakt/settings` reports only `api_key_configured` (true from either source) and
+`api_key_override_configured` (true when an override specifically is saved). Setting
+`settingsEncryptionKey` is required before an `apiKey` override can be saved at all;
+`POST /admin/infakt/settings { "api_key": "..." }` answers 400 with a message naming the
+option otherwise. `POST /admin/infakt/settings { "api_key": "" }` clears a saved override
+and falls back to the boot-time `apiKey`. If `settingsEncryptionKey` is ever rotated or
+removed, a previously saved override can no longer be decrypted; the plugin falls back to
+the boot-time `apiKey` silently at every runtime decision point (never a crash), and
+`api_key_override_configured` staying `true` while invoicing behaves as if it were `false`
+is the signal that this happened.
 
 ### `startDate` is optional, not an enable switch
 
@@ -279,7 +321,7 @@ That is the one failure mode this design refuses to guess about: inFakt has no
 idempotency key, so a retried create can issue a second real numbered invoice, and the
 customer receives two invoices for one order.
 
-Resolving it is a human decision with exactly two outcomes, both on the Invoicing page:
+Resolving it is a human decision with exactly two outcomes, both on the order's detail page:
 
 - **Link invoice** - there is a stray invoice in inFakt. Paste its uuid; the row adopts
   it and continues from the KSeF step. No new invoice is created.
@@ -411,18 +453,17 @@ quietly park itself for a human while a legal deadline passed. A red run state i
 something an operator notices; a growing queue is not.
 
 The check runs at most hourly, and immediately when the integration is known to be
-inactive, so fixing it in inFakt takes effect on the next tick. **Re-check KSeF
-integration** on the Invoicing page forces it right away.
+inactive, so fixing it in inFakt takes effect on the next tick. **Re-check KSeF** on
+**Settings -> inFakt** forces it right away.
 
 A failed _check_ is recorded as an error, never as `active: false`. "We could not reach
 inFakt" and "your integration has lapsed" call for completely different responses.
 
 ## Operator runbook: needs_review
 
-Open **Invoicing** in the admin dashboard. It opens on the `needs_review` filter.
-
-Read the **Detail** column first - it carries the reason, PII-free, and it usually names
-the fix.
+A `needs_review` row raises a Medusa admin notification that deep-links to the order.
+Open that order - the Invoicing widget on its detail page carries the reason, PII-free,
+and usually names the fix, alongside the same operator actions listed below.
 
 | What it says                                                      | What happened                                                                  | What to do                                                                                                                        |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -433,7 +474,7 @@ the fix.
 | _buyer has a NIP but no company name_                             | A B2B invoice needs both.                                                      | Add the company name to the billing address, then **Retry**.                                                                      |
 | _inFakt rejected the invoice: ..._                                | inFakt's validation refused the payload; its own message follows.              | Fix what it names, then **Retry**. Nothing was issued.                                                                            |
 | _KSeF rejected the invoice: ..._                                  | The invoice exists in inFakt but KSeF refused it. The description is KSeF's.   | Fix it in inFakt, then **Retry** - the row resumes at the KSeF step and does not re-create the invoice.                           |
-| _is the KSeF integration active on the inFakt account?_           | The submit was refused and no KSeF status could be read.                       | Fix the integration in inFakt, **Re-check KSeF integration**, then **Retry**.                                                     |
+| _is the KSeF integration active on the inFakt account?_           | The submit was refused and no KSeF status could be read.                       | Fix the integration in inFakt, **Re-check KSeF** on Settings -> inFakt, then **Retry**.                                           |
 | _the order was canceled after its invoice was issued_             | The invoice is real and the order is not.                                      | Issue a corrective invoice in inFakt. This plugin will not do it for you. Then **Skip** with a reason.                            |
 | _the order is no longer fully paid after its invoice was issued_  | The payment was reversed after the fact.                                       | Same as above: correct in inFakt, then **Skip** with a reason.                                                                    |
 | _the order behind this invoice no longer exists_                  | The order was hard-deleted.                                                    | **Skip** with a reason.                                                                                                           |
@@ -490,14 +531,23 @@ invoice looking broken.
 
 All routes live under `/admin` and use Medusa's default admin authentication.
 
-| Route                        | Method    | Purpose                                                                                        |
-| ---------------------------- | --------- | ---------------------------------------------------------------------------------------------- |
-| `/admin/infakt`              | GET       | Configuration, worker run state, per-status counts, crash-window count.                        |
-| `/admin/infakt/invoices`     | GET       | The ledger. `?status=`, `?limit=`, `?offset=`.                                                 |
-| `/admin/infakt/invoices/:id` | POST      | `{ action: "retry" \| "adopt" \| "clear" \| "skip", ... }`.                                    |
-| `/admin/infakt/ksef-check`   | POST      | Re-verify the KSeF integration now.                                                            |
-| `/admin/infakt/enqueue`      | POST      | `{ order_id }`. Queue an order the trigger missed.                                             |
-| `/admin/infakt/settings`     | GET, POST | The effective-enablement picture; `POST { invoicing_paused: boolean }` flips the pause switch. |
+| Route                        | Method    | Purpose                                                                 |
+| ---------------------------- | --------- | ----------------------------------------------------------------------- |
+| `/admin/infakt`              | GET       | Configuration, worker run state, per-status counts, crash-window count. |
+| `/admin/infakt/invoices`     | GET       | The ledger. `?status=`, `?limit=`, `?offset=`.                          |
+| `/admin/infakt/invoices/:id` | POST      | `{ action: "retry" \| "adopt" \| "clear" \| "skip", ... }`.             |
+| `/admin/infakt/ksef-check`   | POST      | Re-verify the KSeF integration now.                                     |
+| `/admin/infakt/enqueue`      | POST      | `{ order_id }`. Queue an order the trigger missed.                      |
+| `/admin/infakt/settings`     | GET, POST | The effective-enablement picture and every live override. See below.    |
+
+`GET /admin/infakt/settings` reports `settings` (the raw override, null where unset) and
+`effective` (the merged, currently-in-effect value) alongside the enablement fields.
+`POST /admin/infakt/settings` accepts any subset of `invoicing_paused`, `currency`,
+`ksef_mode`, `trigger_event`, `environment` and `api_key` - only the fields present are
+written; see
+[Live overrides](#live-overrides-currency-ksefmode-triggerevent-environment-apikey) for the
+full contract, and note that `api_key` has its own 400 when `settingsEncryptionKey` is not
+configured.
 
 A refused action answers **409** with the reason: the request was well-formed, and it is
 the row's state that makes it impossible. The reason is written for the person reading it.
@@ -505,12 +555,13 @@ the row's state that makes it impossible. The reason is written for the person r
 Every route in this table answers with a normal 200 (or a 409 refusal) in every plugin
 state, including fully disabled, unconfigured, paused, or with an empty ledger - none of
 them ever throw into the admin UI over that. The two that touch inFakt directly
-(`ksef-check`, and `invoices/:id` for an `adopt`) guard on `apiKey` being configured
-before reaching `apiClient`, and answer with the same shape they would on success rather
-than surfacing the getter's throw.
+(`ksef-check`, and `invoices/:id` for an `adopt`) guard on the EFFECTIVE `apiKey` being
+configured (boot option or admin override) before reaching the client, and answer with the
+same shape they would on success rather than surfacing the getter's throw.
 
-The API key never appears in any response - the configuration is filtered through a
-public-options shape that does not carry it.
+The API key never appears in any response, encrypted or otherwise - the configuration is
+filtered through a public-options shape that does not carry it, and the settings route
+reports only whether one is configured.
 
 ## Privacy
 
@@ -523,6 +574,10 @@ public-options shape that does not carry it.
   tests asserting the NIP, name, street and company name never appear in one.
 - Buyer data is read from the order transiently to build the payload, and is never logged.
 - The invoice itself lives in inFakt, which is its system of record.
+- **The one credential this plugin persists is encrypted.** An admin-set `apiKey` override
+  (see [Live overrides](#live-overrides-currency-ksefmode-triggerevent-environment-apikey))
+  is the only secret this plugin ever writes to the database, and it is encrypted at rest
+  with `settingsEncryptionKey` before that write happens. No admin route ever reads it back.
 
 ## Testing
 
@@ -549,10 +604,13 @@ Everything runs without a database or network access. What each area covers:
 | `lib/invoicing/operator-actions.test.ts` | What an operator may and may not do to a parked row.                                                                                                                |
 | `lib/invoicing/matching.test.ts`         | The reconciliation engine's three stages and its date tiebreak.                                                                                                     |
 | `lib/invoicing/order-mapper.test.ts`     | Medusa DTO mapping, plus mapper-and-builder end to end.                                                                                                             |
-| `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, what the KSeF check persists, and the settings singleton.                                                                |
+| `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, what the KSeF check persists, the settings singleton, and every config-override read/write/encrypt path.                 |
 | `lib/invoicing/enablement.test.ts`       | The three-source precedence (`apiKey`, pause switch, env force-off) and the env flag's accepted spellings.                                                          |
 | `jobs/infakt-invoicing.test.ts`          | The enablement gate: the worker never claims a run when not effectively enabled, checked fresh every tick.                                                          |
 | `workflows/set-invoicing-paused.test.ts` | The pause switch's write-and-compensate pair, including the round trip back to the original value.                                                                  |
+| `workflows/update-infakt-config.test.ts` | The other five overrides' write-and-compensate pair, restoring the exact raw (still-encrypted) row on rollback, never a re-encrypted plaintext.                     |
+| `lib/crypto/secret-box.test.ts`          | AES-256-GCM round-trip, a wrong key, a corrupt payload, a tampered ciphertext - every one of them a throw, never garbage output.                                    |
+| `lib/invoicing/effective-config.test.ts` | Merging overrides onto boot options field by field, and the `apiKey` override's decrypt-or-fall-back-silently behavior under every failure mode.                    |
 | `workflows/`, `api/`, `subscribers/`     | Compensation capture, route contracts, that every admin route answers 200/409 rather than throwing when disabled or empty, and that the trigger only ever enqueues. |
 
 `service.test.ts` builds a `this` on top of `InfaktModuleService.prototype` with the

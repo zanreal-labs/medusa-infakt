@@ -1,5 +1,6 @@
 import type { MedusaRequest } from "@medusajs/framework/http";
 import { describe, expect, it, vi } from "vitest";
+import { resolveInfaktOptions } from "../../../lib/options";
 import { INFAKT_MODULE } from "../../../modules/infakt";
 import { mockResponse } from "./__tests__/mock-response";
 import { GET } from "./route";
@@ -13,6 +14,9 @@ const request = (service: unknown, extra: Partial<MedusaRequest> = {}): MedusaRe
   }) as unknown as MedusaRequest;
 
 const service = (invoices: Record<string, unknown>[] = []) => ({
+  getEffectiveOptions: vi
+    .fn()
+    .mockResolvedValue(resolveInfaktOptions({ apiKey: "test-key", startDate: "2026-07-01" })),
   getRunState: vi.fn().mockResolvedValue({
     id: "singleton",
     ksef_active: true,
@@ -20,13 +24,6 @@ const service = (invoices: Record<string, unknown>[] = []) => ({
     status: "ok",
   }),
   listInfaktInvoices: vi.fn().mockResolvedValue(invoices),
-  publicOptions: {
-    currency: "PLN",
-    disabled: false,
-    environment: "production",
-    ksefMode: "nip-only",
-    startDate: "2026-07-01",
-  },
 });
 
 describe("GET /admin/infakt", () => {
@@ -93,19 +90,13 @@ describe("GET /admin/infakt", () => {
   });
 
   it("answers 200 with a disabled, empty-counts payload when the plugin has no apiKey - never a 500", async () => {
-    // This route touches only listInfaktInvoices, getRunState and publicOptions -
-    // never apiClient - so a disabled plugin is exactly as safe to render as an
-    // enabled one with zero rows.
+    // This route touches only listInfaktInvoices, getRunState and
+    // getEffectiveOptions - never the API client - so a disabled plugin is
+    // exactly as safe to render as an enabled one with zero rows.
     const disabled = {
+      getEffectiveOptions: vi.fn().mockResolvedValue(resolveInfaktOptions({})),
       getRunState: vi.fn().mockResolvedValue({ id: "singleton", status: "idle" }),
       listInfaktInvoices: vi.fn().mockResolvedValue([]),
-      publicOptions: {
-        currency: "PLN",
-        disabled: true,
-        environment: "production",
-        ksefMode: "nip-only",
-        startDate: null,
-      },
     };
     const res = mockResponse();
     await GET(request(disabled), res);

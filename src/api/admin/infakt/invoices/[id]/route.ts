@@ -44,11 +44,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     );
   }
 
-  // Adopt is the one action here that touches `apiClient`. Guard on `enabled`
-  // before it, rather than letting the getter's throw reach this handler as an
-  // uncaught error - refused-with-a-reason is the same shape every other
-  // impossible action on this route already answers with.
-  if (action === "adopt" && !infakt.resolvedOptions.enabled) {
+  // Adopt is the one action here that touches the inFakt API client. Guard on
+  // the EFFECTIVE `enabled` (boot `apiKey` or an admin-set override) before it,
+  // rather than letting the getter's throw reach this handler as an uncaught
+  // error - refused-with-a-reason is the same shape every other impossible
+  // action on this route already answers with. Checked only for `adopt`, so the
+  // other three actions cost no extra round trip.
+  if (action === "adopt" && !(await infakt.getEffectiveOptions()).enabled) {
     res.status(409).json({
       error: "the plugin is disabled (no `apiKey` configured) - there is no inFakt to adopt from",
       id,
@@ -100,7 +102,8 @@ async function readAdoptedInvoiceNumber(
     );
   }
   try {
-    const invoice = await infakt.apiClient.getInvoice(trimmed);
+    const client = await infakt.getApiClient();
+    const invoice = await client.getInvoice(trimmed);
     return invoice.number ?? null;
   } catch (error) {
     if (error instanceof InfaktApiError && error.httpStatus === 404) {

@@ -696,6 +696,57 @@
           "enumItems": [],
           "mappedType": "text"
         },
+        "api_key_ciphertext": {
+          "name": "api_key_ciphertext",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
+        "environment": {
+          "name": "environment",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "production",
+            "sandbox"
+          ],
+          "mappedType": "enum"
+        },
         "invoicing_paused": {
           "name": "invoicing_paused",
           "type": "boolean",
@@ -711,6 +762,45 @@
           "comment": null,
           "enumItems": [],
           "mappedType": "boolean"
+        },
+        "ksef_mode": {
+          "name": "ksef_mode",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "nip-only",
+            "all",
+            "never"
+          ],
+          "mappedType": "enum"
+        },
+        "trigger_event": {
+          "name": "trigger_event",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [
+            "payment.captured",
+            "order.placed"
+          ],
+          "mappedType": "enum"
         },
         "created_at": {
           "name": "created_at",

@@ -180,6 +180,25 @@ describe("resolveInfaktOptions: boot failures", () => {
   });
 });
 
+describe("resolveInfaktOptions: settingsEncryptionKey", () => {
+  it("resolves to null when unset", () => {
+    expect(resolveInfaktOptions(valid()).settingsEncryptionKey).toBeNull();
+  });
+
+  it("trims and keeps a configured key", () => {
+    expect(
+      resolveInfaktOptions(valid({ settingsEncryptionKey: "  a-long-secret  " }))
+        .settingsEncryptionKey,
+    ).toBe("a-long-secret");
+  });
+
+  it("rejects a blank key rather than silently treating it as unset", () => {
+    expect(() => resolveInfaktOptions(valid({ settingsEncryptionKey: "   " }))).toThrow(
+      /settingsEncryptionKey/u,
+    );
+  });
+});
+
 describe("toPublicInfaktOptions", () => {
   it("never carries the api key, the extractor or the predicate", () => {
     const publicOptions = toPublicInfaktOptions(
