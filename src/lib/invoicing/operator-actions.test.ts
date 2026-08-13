@@ -10,7 +10,7 @@ const row = (overrides: Partial<InvoiceStateRow> = {}): InvoiceStateRow => ({
 });
 
 const plan = (target: InvoiceStateRow, input: OperatorActionInput, emitEvent = true) =>
-  planOperatorAction(target, input, { emitEvent });
+  planOperatorAction(target, input, { emitEvent, ksefMode: "nip-only" });
 
 const crashed = row({ status: "needs_review", submit_started_at: new Date() });
 
@@ -129,6 +129,59 @@ describe("adopt", () => {
     expect(result).toMatchObject({ ok: true });
     if (result.ok) {
       expect(result.patch.task_reference).toBe("ref-1");
+    }
+  });
+
+  it("marks an adopted B2B invoice as still owing KSeF a filing", () => {
+    // The bug this covers: without a KSeF decision the row completes as `done`
+    // without ever being filed, which is a legal exposure that looks like success.
+    const result = plan(crashed, {
+      action: "adopt",
+      invoiceTaxCode: "526-104-08-28",
+      invoiceUuid: "u-9",
+      orderId: "order_1",
+    });
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.patch).toMatchObject({ is_company: true, ksef_required: true });
+      expect(result.patch.ksef_decision_reason).toContain("NIP");
+    }
+  });
+
+  it("marks an adopted consumer invoice as outside KSeF", () => {
+    const result = plan(crashed, {
+      action: "adopt",
+      invoiceTaxCode: null,
+      invoiceUuid: "u-9",
+      orderId: "order_1",
+    });
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.patch).toMatchObject({ is_company: false, ksef_required: false });
+      expect(result.patch.ksef_decision_reason).toContain("consumer");
+    }
+  });
+
+  it("follows the KSeF mode in force, not the buyer alone", () => {
+    const consumer = planOperatorAction(
+      crashed,
+      { action: "adopt", invoiceTaxCode: null, invoiceUuid: "u-9" },
+      { emitEvent: true, ksefMode: "all" },
+    );
+    expect(consumer).toMatchObject({ ok: true });
+    if (consumer.ok) {
+      expect(consumer.patch.ksef_required).toBe(true);
+    }
+  });
+
+  it("leaves the KSeF columns alone when the caller read no tax code", () => {
+    // `undefined` means "not looked up", which must not overwrite the decision the
+    // pipeline already froze on the row.
+    const result = plan(crashed, { action: "adopt", invoiceUuid: "u-9" });
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.patch).not.toHaveProperty("ksef_required");
+      expect(result.patch).not.toHaveProperty("is_company");
     }
   });
 

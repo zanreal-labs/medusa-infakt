@@ -1,3 +1,6 @@
+import { decideKsef } from "./ksef";
+import type { KsefDecider, KsefMode } from "./ksef";
+import { invoiceIsCompany } from "./reconcile";
 import { nextStep } from "./state-machine";
 import type { InvoiceStateRow } from "./state-machine";
 
@@ -40,6 +43,21 @@ export interface OperatorActionInput {
   confirmNoDuplicate?: boolean;
   /** Known invoice number for an adopted invoice, when the caller looked it up. */
   invoiceNumber?: string | null;
+  /**
+   * The `client_tax_code` on the adopted inFakt invoice, read by the caller from
+   * the same lookup that confirmed the invoice exists. This is what decides KSeF
+   * for an adopted row; see `planAdopt`.
+   */
+  invoiceTaxCode?: string | null;
+  /** The row's order, for a custom `ksef.decide` predicate. */
+  orderId?: string;
+}
+
+/** The configuration the rules read. Effective values, not boot-time ones. */
+export interface OperatorActionConfig {
+  emitEvent: boolean;
+  ksefMode: KsefMode;
+  ksefDecide?: KsefDecider;
 }
 
 export type OperatorActionResult =
@@ -54,14 +72,14 @@ export function isInCrashWindow(row: InvoiceStateRow, emitEvent: boolean): boole
 export function planOperatorAction(
   row: InvoiceStateRow,
   input: OperatorActionInput,
-  config: { emitEvent: boolean },
+  config: OperatorActionConfig,
 ): OperatorActionResult {
   switch (input.action) {
     case "retry": {
       return planRetry(row, config.emitEvent);
     }
     case "adopt": {
-      return planAdopt(row, input);
+      return planAdopt(row, input, config);
     }
     case "clear": {
       return planClear(row, input);
@@ -101,7 +119,29 @@ function planRetry(row: InvoiceStateRow, emitEvent: boolean): OperatorActionResu
   };
 }
 
-function planAdopt(row: InvoiceStateRow, input: OperatorActionInput): OperatorActionResult {
+/**
+ * Take over an invoice that already exists in inFakt.
+ *
+ * The KSeF fields are decided HERE, from the tax code on the adopted document,
+ * because for most rows that reach this action nothing else ever will. A row parked
+ * by the create crash window did run `submit-create` and does carry a frozen
+ * decision, but a row adopted from any earlier state never ran that step: leaving
+ * `ksef_required` null then makes `nextStep` walk straight past the KSeF step, and a
+ * B2B invoice completes as `done` without ever being filed. Filing B2B invoices has
+ * been mandatory in Poland since April 2026, so that is a legal exposure that looks
+ * exactly like success.
+ *
+ * The decision is re-derived rather than preserved when the row already carries one,
+ * for the same reason the pipeline freezes it: the document being adopted is the
+ * authority on who the buyer is, and its tax code is read from inFakt itself by the
+ * caller. When the caller supplies no tax code at all (`undefined`), an existing
+ * decision on the row is left untouched rather than being overwritten with a guess.
+ */
+function planAdopt(
+  row: InvoiceStateRow,
+  input: OperatorActionInput,
+  config: OperatorActionConfig,
+): OperatorActionResult {
   const uuid = input.invoiceUuid?.trim();
   if (!uuid) {
     return { ok: false, reason: "an inFakt invoice uuid is required to adopt an existing invoice" };
@@ -129,7 +169,29 @@ function planAdopt(row: InvoiceStateRow, input: OperatorActionInput): OperatorAc
       // Without this the row would immediately fall back into the crash window on
       // the next tick, since a set marker with no task reference is what defines it.
       task_reference: row.task_reference ?? `adopted:${uuid}`,
+      ...ksefFieldsForAdoption(input, config),
     },
+  };
+}
+
+/** The KSeF columns an adopt writes, or nothing when the caller read no tax code. */
+function ksefFieldsForAdoption(
+  input: OperatorActionInput,
+  config: OperatorActionConfig,
+): Record<string, unknown> {
+  if (input.invoiceTaxCode === undefined) {
+    return {};
+  }
+  const { isCompany, nip } = invoiceIsCompany(input.invoiceTaxCode ?? undefined);
+  const decision = decideKsef(
+    { isCompany, nip, orderId: input.orderId ?? "" },
+    config.ksefMode,
+    config.ksefDecide,
+  );
+  return {
+    is_company: isCompany,
+    ksef_decision_reason: decision.reason,
+    ksef_required: decision.file,
   };
 }
 

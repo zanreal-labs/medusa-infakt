@@ -268,12 +268,43 @@ export class InfaktClient {
    * GET /invoices.json - the invoice list, used by the reconciliation tool to
    * find an invoice that already exists for an order. Paged via `offset`/`limit`
    * (inFakt caps `limit` at 100).
+   *
+   * The filters map onto inFakt's Ransack-style query parameters, documented in
+   * github.com/infakt/API readme.md ("Filtrowanie"):
+   *
+   *  - `issuedFrom` / `issuedTo` -> `q[invoice_date_gteq]` / `q[invoice_date_lteq]`,
+   *    both YYYY-MM-DD, both inclusive. This is the only server-side narrowing the
+   *    reconciliation can lean on, and it is the important one: it turns "read the
+   *    whole invoice history" into "read the weeks around these orders".
+   *  - `taxCode` -> `q[clean_client_nip_eq]`, digits only, no country prefix and no
+   *    separators. Documented as a LIST-ONLY filter parameter; it is not a field on
+   *    the invoice object itself.
+   *
+   * inFakt exposes no filter for the gross total and none for the buyer's email or
+   * name, so those two signals can only be applied client-side, after the page is
+   * read. That is why the reconciliation fetches a date window rather than querying
+   * per order.
    */
-  async listInvoices(options?: { offset?: number; limit?: number }): Promise<InfaktInvoice[]> {
+  async listInvoices(options?: {
+    offset?: number;
+    limit?: number;
+    /** Inclusive lower bound on `invoice_date`, YYYY-MM-DD. */
+    issuedFrom?: string;
+    /** Inclusive upper bound on `invoice_date`, YYYY-MM-DD. */
+    issuedTo?: string;
+    /** Buyer NIP, digits only. */
+    taxCode?: string;
+    /** e.g. "invoice_date asc". */
+    order?: string;
+  }): Promise<InfaktInvoice[]> {
     const raw = await this.request<InvoiceListResponse>("GET", "/invoices.json", {
       query: {
         limit: options?.limit === undefined ? undefined : String(options.limit),
         offset: options?.offset === undefined ? undefined : String(options.offset),
+        order: options?.order,
+        "q[clean_client_nip_eq]": options?.taxCode,
+        "q[invoice_date_gteq]": options?.issuedFrom,
+        "q[invoice_date_lteq]": options?.issuedTo,
       },
     });
     return (raw?.entities ?? []).map(mapInvoice);

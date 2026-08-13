@@ -12,6 +12,7 @@ import type { ApplyInvoiceActionInput, InvoiceActionService } from "./apply-invo
 const service = (row?: Record<string, unknown>) => {
   const updateInfaktInvoices = vi.fn().mockResolvedValue([]);
   return {
+    getEffectiveOptions: vi.fn().mockResolvedValue({ ksefMode: "nip-only" as const }),
     listInfaktInvoices: vi.fn().mockResolvedValue(row ? [row] : []),
     resolvedOptions: { emitIssuedEvent: true as boolean },
     updateInfaktInvoices,

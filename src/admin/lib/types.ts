@@ -72,6 +72,51 @@ export interface InvoiceListResponse {
 
 export type EnablementReason = "env_force_disabled" | "no_api_key" | "paused" | "active";
 
+/** One invoice inFakt holds, as the reconciliation report describes it. */
+export interface ReconcileCandidate {
+  uuid: string;
+  number: string | null;
+  invoiceDate: string | null;
+  grossPrice: number | null;
+}
+
+/**
+ * One order's reconciliation outcome, from `/admin/infakt/reconcile`.
+ *
+ * `decision` is the whole contract: only `adopt` may be applied, and only by
+ * naming the order explicitly. `ambiguous` covers every case a human has to
+ * settle - several invoices fit, or the one that fits is already recorded
+ * against another order.
+ */
+export interface ReconcileEntry {
+  orderId: string;
+  displayId?: number | string | null;
+  decision: "adopt" | "ambiguous" | "no_match";
+  invoice?: ReconcileCandidate;
+  confidence?: "high" | "medium";
+  candidates: ReconcileCandidate[];
+  reasons: string[];
+}
+
+export interface ReconcileResponse {
+  window: { from: string; to: string; tolerance_days: number };
+  summary: {
+    scanned: number;
+    adopt: number;
+    ambiguous: number;
+    no_match: number;
+    invoices_considered: number;
+  };
+  /** The window held more orders or invoices than one pass reads. Narrow it. */
+  truncated: boolean;
+  entries: ReconcileEntry[];
+  applied: boolean;
+  adopted?: { order_id: string; invoice_number: string | null; invoice_uuid: string }[];
+  skipped?: { order_id: string; reason: string }[];
+  /** Named orders whose match did not survive the server's re-derivation. */
+  refused?: string[];
+}
+
 /**
  * The raw admin-editable overrides, exactly as saved - null means "not
  * overridden, following `medusa-config.ts`". This is what the Settings page's

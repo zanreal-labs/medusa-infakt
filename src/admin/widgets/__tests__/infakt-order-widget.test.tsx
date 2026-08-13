@@ -241,6 +241,33 @@ describe("describeKsef", () => {
     ).toBe("pending");
   });
 
+  it("does not promise a filing for an adopted B2B document this plugin will never submit", () => {
+    // The reconciliation records `ksef_required` on an adopted row as an audit
+    // fact. The row is terminal, so nothing will act on it - and claiming a
+    // pending filing would be a promise nobody is going to keep.
+    expect(
+      describeKsef({
+        ...baseRow,
+        adopted_at: new Date().toISOString(),
+        is_company: true,
+        ksef_required: true,
+        status: "done",
+      }),
+    ).toBe("not tracked by this plugin");
+  });
+
+  it("still reports a pending filing for an adopted row the worker is still driving", () => {
+    expect(
+      describeKsef({
+        ...baseRow,
+        adopted_at: new Date().toISOString(),
+        is_company: true,
+        ksef_required: true,
+        status: "processing",
+      }),
+    ).toBe("pending");
+  });
+
   it("is 'not applicable' for a skipped order - no invoice was ever issued", () => {
     expect(describeKsef({ ...baseRow, status: "skipped" })).toBe("not applicable");
     expect(describeKsef({ ...baseRow, is_company: true, status: "skipped" })).toBe(

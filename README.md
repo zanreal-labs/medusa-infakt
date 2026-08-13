@@ -25,6 +25,7 @@ follows from that.
 - [The crash window, and why the create is never retried](#the-crash-window-and-why-the-create-is-never-retried)
 - [The total-match guard](#the-total-match-guard)
 - [Orders backfilled from a legacy system](#orders-backfilled-from-a-legacy-system)
+- [Adopting invoices that already exist in inFakt](#adopting-invoices-that-already-exist-in-infakt)
 - [Where the buyer's NIP comes from](#where-the-buyers-nip-comes-from)
 - [KSeF](#ksef)
 - [Operator runbook: needs_review](#operator-runbook-needs_review)
@@ -383,11 +384,86 @@ Two structural facts make this a narrower problem than it first sounds:
   for it. A store on the default trigger never enqueues these orders at all - the
   metadata guard above is the safety net for `order.placed`-triggered stores and
   for the manual recovery endpoint, not the first line of defense.
-- **The reconciliation engine only touches rows already in this plugin's ledger.**
-  `lib/invoicing/matching.ts` exists to adopt a stray inFakt invoice onto an
-  existing `infakt_invoice` row - it is not wired to a route yet (see
-  [Roadmap](#roadmap)) - and even once it is, it will never create a row for an
-  order the pipeline has not already enqueued. It cannot import history on its own.
+- **Nothing about that guard reaches inFakt.** It reads the order's own metadata and
+  refuses, which is a decision about this pipeline. Recovering the invoice itself is
+  a separate, deliberate act; see the next section.
+
+An export that produced this metadata can also be WRONG. An order whose invoice
+number was lost in the export looks, to the guard above, like an order that was
+never invoiced - while the invoice sits in inFakt, correctly issued and filed. That
+is what the reconciliation below exists to recover, and it recovers it from inFakt,
+not from whatever produced the export.
+
+## Adopting invoices that already exist in inFakt
+
+`GET /admin/infakt/reconcile`, and the **Adopt existing invoices** panel on the
+plugin's settings page.
+
+For a store whose history was invoiced somewhere else: the documents are real,
+numbered and filed, and only this ledger does not know about them. The
+reconciliation reads invoices from the **inFakt API** and matches them to Medusa
+orders on **order data alone**. No other system is consulted, and none needs to
+exist - not the legacy system that issued them, not the export that lost them.
+
+### The rules, and why each one is there
+
+Every rule below is a hard gate. There is no score, and no signal can make up for a
+failing one.
+
+| Gate                  | Rule                                                                                | Why                                                                                                                       |
+| --------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **Issue date**        | `invoice_date` within `tolerance_days` (default **7**, max 31) of the order's Warsaw calendar day. An undated invoice is dropped. | Keeps a repeat customer's later order from matching the earlier invoice for the same basket. Warsaw, because that is the day the invoice itself is dated. |
+| **Buyer identity**    | B2B: exact normalized NIP. B2C: exact email OR exact normalized full name.           | The one signal that says these are the same person. Diacritics and NIP prefixes are normalized away first.                |
+| **Gross total**       | Integer equality in grosze, no tolerance. Currency must agree when both state one.    | An amount that is close is an amount that is wrong. A one-grosz drift means it is a different document.                    |
+| **Uniqueness**        | Exactly one invoice may survive all three.                                            | Two survivors is the duplicate-invoice case, which is precisely what a human has to look at.                               |
+| **Not already taken** | The invoice must not already be recorded on another ledger row, by uuid or by number. | One document settles one order. The number check matters because an imported row may carry only the number.               |
+| **The order's own claim** | When `order.metadata.invoice_number` names an invoice, the match must BE that one. | An order that names an invoice and matches a different one by amount and buyer is a warning, not a discovery.            |
+
+Line positions are checked but are **not** a gate: an invoice issued by another
+system names its lines its own way. They are the difference between a `high` and a
+`medium` confidence match, which the report shows for every proposal.
+
+A multi-candidate case is **reported, never guessed**. `matching.ts` has a
+nearest-date tiebreak for the crash-window flow, where a human is already looking at
+one order and knows an invoice exists; it is deliberately not used here.
+
+### What it will not do
+
+- **It will not touch an order that already has a ledger row.** Not re-match it, not
+  update it, not report it. That is the idempotency guarantee, and it rests on the
+  same unique `order_id` the enqueue path does: a re-run writes nothing.
+- **It will not issue anything.** No invoice is created, nothing is sent to KSeF, and
+  no `infakt.invoice.issued` event is emitted. An adopted row is written straight to
+  `done`, and `listDueInvoices` never picks a `done` row up again.
+- **It will not apply anything you did not ask for.** Both methods are a dry run
+  unless the POST body carries BOTH `apply: true` and an explicit `order_ids` list,
+  and the server re-derives each named order's match before writing - a plan that has
+  gone stale between the preview and the click cannot be applied from the client's
+  copy of it.
+
+### What is recorded
+
+An adopted row carries `adopted_at`, the invoice's uuid and number, `completed_at`
+set to the day the document was issued, and `adopted_evidence`: the signal that
+identified the buyer, the gross total, how far the issue date sat from the order,
+and whether the line positions confirmed it. Signal KINDS and numbers only - never
+an email or a name, because this table holds no buyer data.
+
+`ksef_required` is recorded too, decided from the tax code on the adopted document
+exactly as `decideKsef` would have decided it. On a terminal adopted row it is an
+audit fact, not an instruction: nothing acts on a `done` row, and the order widget
+says "not tracked by this plugin" rather than claiming a filing is queued.
+
+### Which inFakt endpoints it uses
+
+- `GET /invoices.json` with `q[invoice_date_gteq]` / `q[invoice_date_lteq]`, paged
+  100 at a time. The date range is the only server-side narrowing that helps:
+  **inFakt has no filter for the gross total, and none for the buyer's email or
+  name**, so those are applied here, after the page is read.
+- `GET /invoices/{uuid}.json`, at most once per proposed adoption, and only to read
+  line positions the list response did not carry.
+
+Both are reads. The reconciliation calls nothing that creates, sends or files.
 
 ## Where the buyer's NIP comes from
 
@@ -538,6 +614,7 @@ All routes live under `/admin` and use Medusa's default admin authentication.
 | `/admin/infakt/invoices/:id` | POST      | `{ action: "retry" \| "adopt" \| "clear" \| "skip", ... }`.             |
 | `/admin/infakt/ksef-check`   | POST      | Re-verify the KSeF integration now.                                     |
 | `/admin/infakt/enqueue`      | POST      | `{ order_id }`. Queue an order the trigger missed.                      |
+| `/admin/infakt/reconcile`    | GET, POST | Adopt invoices that already exist in inFakt. Dry run unless asked otherwise. |
 | `/admin/infakt/settings`     | GET, POST | The effective-enablement picture and every live override. See below.    |
 
 `GET /admin/infakt/settings` reports `settings` (the raw override, null where unset) and
@@ -548,6 +625,12 @@ written; see
 [Live overrides](#live-overrides-currency-ksefmode-triggerevent-environment-apikey) for the
 full contract, and note that `api_key` has its own 400 when `settingsEncryptionKey` is not
 configured.
+
+`/admin/infakt/reconcile` takes `from` and `to` (both `YYYY-MM-DD`, required) and an
+optional `tolerance_days`. `GET` always reports; `POST` reports too, unless the body
+carries BOTH `apply: true` and a non-empty `order_ids` - applying every match at once
+is deliberately not possible. See
+[Adopting invoices that already exist in inFakt](#adopting-invoices-that-already-exist-in-infakt).
 
 A refused action answers **409** with the reason: the request was well-formed, and it is
 the row's state that makes it impossible. The reason is written for the person reading it.
@@ -602,7 +685,9 @@ Everything runs without a database or network access. What each area covers:
 | `lib/invoicing/state-machine.test.ts`    | Backoff, outcome classification, and `nextStep` - including the crash-window refusal.                                                                               |
 | `lib/invoicing/pipeline.test.ts`         | The steps in order, resume from every intermediate state, the KSeF 422 ambiguity, and the backfilled-order guard.                                                   |
 | `lib/invoicing/operator-actions.test.ts` | What an operator may and may not do to a parked row.                                                                                                                |
-| `lib/invoicing/matching.test.ts`         | The reconciliation engine's three stages and its date tiebreak.                                                                                                     |
+| `lib/invoicing/matching.test.ts`         | The matching engine's three stages and its date tiebreak.                                                                                                          |
+| `lib/invoicing/reconcile.test.ts`        | The adoption rules: the date window, what is refused, one invoice per order, and that the evidence carries no buyer data.                                            |
+| `workflows/adopt-invoices.test.ts`       | That an already-ledgered order is left alone, that the written row is terminal, and that compensation removes exactly what it created.                               |
 | `lib/invoicing/order-mapper.test.ts`     | Medusa DTO mapping, plus mapper-and-builder end to end.                                                                                                             |
 | `modules/infakt/service.test.ts`         | The claim/release SQL, idempotent enqueue, what the KSeF check persists, the settings singleton, and every config-override read/write/encrypt path.                 |
 | `lib/invoicing/enablement.test.ts`       | The three-source precedence (`apiKey`, pause switch, env force-off) and the env flag's accepted spellings.                                                          |
@@ -675,11 +760,6 @@ for.
 - **Integration tests against a live Postgres** via `@medusajs/test-utils`
   (`moduleIntegrationTestRunner`) for the one property unit tests cannot assert: that two
   concurrent claims really do serialize on the row lock.
-- **The reconciliation tool wired to a route.** The matching engine
-  (`lib/invoicing/matching.ts`) is complete and tested - identity, exact total, position
-  overlap, with a day-precision date tiebreak - but nothing calls it yet. It is what will
-  let an operator adopt a whole back catalogue of existing inFakt invoices, and it will
-  never auto-apply an ambiguous match.
 - **Invoice PDF storage** through Medusa's File Module, so a merchant is not dependent on
   inFakt's retention.
 - **A `pl` translation** for the admin surface.

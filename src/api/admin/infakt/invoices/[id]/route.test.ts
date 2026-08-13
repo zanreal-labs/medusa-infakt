@@ -85,6 +85,22 @@ describe("POST /admin/infakt/invoices/:id", () => {
     expect(getInvoice.mock.invocationCallOrder[0]).toBeLessThan(run.mock.invocationCallOrder[0]);
   });
 
+  it("carries the adopted invoice's tax code through, so the row's KSeF decision is made", async () => {
+    const getInvoice = vi
+      .fn()
+      .mockResolvedValue({ clientTaxCode: "5261040828", number: "7/07/2026", uuid: "u-9" });
+    const svc = service({ getApiClient: vi.fn().mockResolvedValue({ getInvoice }) });
+    await POST(request(svc, { action: "adopt", invoice_uuid: "u-9" }), mockResponse());
+    expect(run.mock.calls[0][0].input.invoiceTaxCode).toBe("5261040828");
+  });
+
+  it("reports a consumer invoice's absent tax code as null, not as 'not looked up'", async () => {
+    // null and undefined mean different things downstream: null decides "consumer",
+    // undefined leaves whatever the row already froze.
+    await POST(request(service(), { action: "adopt", invoice_uuid: "u-9" }), mockResponse());
+    expect(run.mock.calls[0][0].input.invoiceTaxCode).toBeNull();
+  });
+
   it("requires a uuid to adopt", async () => {
     await expect(POST(request(service(), { action: "adopt" }), mockResponse())).rejects.toThrow(
       /`invoice_uuid` is required/u,

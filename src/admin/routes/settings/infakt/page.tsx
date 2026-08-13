@@ -14,6 +14,7 @@ import {
   toast,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
+import { ReconcilePanel } from "../../../components/reconcile-panel";
 import { sdk } from "../../../lib/sdk";
 import type { InfaktSettings, OverviewResponse } from "../../../lib/types";
 
@@ -382,6 +383,8 @@ const InfaktSettingsPage = () => {
           </Button>
         </div>
       </div>
+
+      <ReconcilePanel />
 
       {config ? (
         <div className="px-6 py-4">

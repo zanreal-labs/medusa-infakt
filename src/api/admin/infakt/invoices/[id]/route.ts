@@ -60,16 +60,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
 
   // For an adopt, confirm the invoice exists in inFakt BEFORE the link is written,
   // and carry its number over. Linking a uuid that does not exist would leave the
-  // row looking complete with no document behind it.
-  const invoiceNumber =
-    action === "adopt" ? await readAdoptedInvoiceNumber(infakt, body.invoice_uuid) : null;
+  // row looking complete with no document behind it. The same lookup yields the
+  // buyer's tax code, which is what decides whether the adopted row still owes KSeF
+  // a filing.
+  const adopted = action === "adopt" ? await readAdoptedInvoice(infakt, body.invoice_uuid) : null;
 
   const { result } = (await applyInvoiceActionWorkflow(req.scope).run({
     input: {
       action,
       confirmNoDuplicate: body.confirm_no_duplicate,
       id,
-      invoiceNumber,
+      invoiceNumber: adopted?.number ?? null,
+      invoiceTaxCode: adopted ? (adopted.taxCode ?? null) : undefined,
       invoiceUuid: body.invoice_uuid,
       reason: body.reason,
     },
@@ -85,15 +87,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
 }
 
 /**
- * Read the invoice an operator is adopting, and return its number.
+ * Read the invoice an operator is adopting, and return the two facts the row needs
+ * from it: the number inFakt assigned, and the buyer's tax code.
  *
  * A 404 from inFakt is reported as invalid input rather than a server error: the
  * operator mistyped a uuid, which is theirs to fix.
  */
-async function readAdoptedInvoiceNumber(
+async function readAdoptedInvoice(
   infakt: InfaktModuleService,
   uuid: string | undefined,
-): Promise<string | null> {
+): Promise<{ number: string | null; taxCode: string | null }> {
   const trimmed = uuid?.trim();
   if (!trimmed) {
     throw new MedusaError(
@@ -104,7 +107,7 @@ async function readAdoptedInvoiceNumber(
   try {
     const client = await infakt.getApiClient();
     const invoice = await client.getInvoice(trimmed);
-    return invoice.number ?? null;
+    return { number: invoice.number ?? null, taxCode: invoice.clientTaxCode ?? null };
   } catch (error) {
     if (error instanceof InfaktApiError && error.httpStatus === 404) {
       throw new MedusaError(
