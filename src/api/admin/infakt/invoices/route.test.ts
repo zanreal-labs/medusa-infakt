@@ -64,6 +64,40 @@ describe("GET /admin/infakt/invoices", () => {
     );
   });
 
+  it("narrows to a single order when order_id is given", async () => {
+    const svc = service();
+    await GET(request(svc, { order_id: "order_01" }), mockResponse());
+    expect(svc.listInfaktInvoices).toHaveBeenCalledWith(
+      { order_id: ["order_01"] },
+      expect.anything(),
+    );
+  });
+
+  it("lets order_id win over a status filter so the order's row cannot be hidden", async () => {
+    const svc = service();
+    await GET(request(svc, { order_id: "order_01", status: "done" }), mockResponse());
+    expect(svc.listInfaktInvoices).toHaveBeenCalledWith(
+      { order_id: ["order_01"] },
+      expect.anything(),
+    );
+  });
+
+  it("answers 200 with an empty list when an order has no row - never an error", async () => {
+    const svc = service([]);
+    const res = mockResponse();
+    await GET(request(svc, { order_id: "order_never_queued" }), res);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ invoices: [] }));
+  });
+
+  it("answers 200 with an empty list on a disabled/empty plugin - never a 500", async () => {
+    const svc = service([]);
+    const res = mockResponse();
+    await GET(request(svc), res);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ invoices: [] }));
+  });
+
   it("annotates each row with whether retry is unsafe", async () => {
     const res = mockResponse();
     await GET(
