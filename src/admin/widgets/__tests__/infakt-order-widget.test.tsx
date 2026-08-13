@@ -12,7 +12,9 @@ import type { InfaktInvoiceRow, InfaktSettings } from "../../lib/types";
 const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
 vi.mock("../../lib/sdk", () => ({ sdk: { client: { fetch: fetchMock } } }));
 
-const InfaktOrderWidget = (await import("../infakt-order-widget")).default;
+const widgetModule = await import("../infakt-order-widget");
+const InfaktOrderWidget = widgetModule.default;
+const { describeKsef } = widgetModule;
 
 const settings = (over: Partial<InfaktSettings> = {}): InfaktSettings => ({
   api_key_configured: true,
@@ -152,6 +154,57 @@ describe("order invoicing widget", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Link invoice" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+    // A backfilled/adopted row never ran the pipeline's KSeF decision step, so
+    // `ksef_required` is null here - the same shape as the 24 historical
+    // invoices imported straight into the ledger. It must not claim a filing
+    // is queued for a consumer invoice that will never be filed.
+    expect(await screen.findByText("not required")).toBeTruthy();
+    expect(screen.queryByText("pending")).toBeNull();
+  });
+
+  it("shows a consumer invoice's KSeF field as not required, never as pending", async () => {
+    wire(
+      [
+        {
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2026/2",
+          is_company: false,
+          ksef_required: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText("consumer")).toBeTruthy();
+    expect(screen.getByText("not required")).toBeTruthy();
+    expect(screen.queryByText("pending")).toBeNull();
+  });
+
+  it("shows a B2B invoice still awaiting KSeF filing as pending", async () => {
+    wire(
+      [
+        {
+          attempts: 0,
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2026/3",
+          invoice_uuid: "inv-uuid-1",
+          is_company: true,
+          ksef_required: true,
+          order_id: "order_1",
+          status: "processing",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText("company (B2B)")).toBeTruthy();
+    expect(screen.getByText("pending")).toBeTruthy();
   });
 
   it("surfaces a load failure as an inline dismissible message, not a crash", async () => {
@@ -159,5 +212,54 @@ describe("order invoicing widget", () => {
     render(<InfaktOrderWidget data={{ id: "order_1" }} />);
     expect(await screen.findByText(/network down/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+});
+
+describe("describeKsef", () => {
+  const baseRow = {
+    attempts: 0,
+    id: "inv_1",
+    in_crash_window: false,
+    is_company: false,
+    order_id: "order_1",
+  } as InfaktInvoiceRow;
+
+  it("reads a known ksef_number or ksef_status first, regardless of anything else", () => {
+    expect(describeKsef({ ...baseRow, ksef_number: "KSEF-1", status: "done" })).toBe("KSEF-1");
+    expect(describeKsef({ ...baseRow, ksef_status: "sent", status: "processing" })).toBe("sent");
+  });
+
+  it("is 'not required' for a decided consumer invoice", () => {
+    expect(describeKsef({ ...baseRow, ksef_required: false, status: "done" })).toBe(
+      "not required",
+    );
+  });
+
+  it("is 'pending' for a decided B2B invoice still awaiting filing", () => {
+    expect(
+      describeKsef({ ...baseRow, is_company: true, ksef_required: true, status: "processing" }),
+    ).toBe("pending");
+  });
+
+  it("is 'not applicable' for a skipped order - no invoice was ever issued", () => {
+    expect(describeKsef({ ...baseRow, status: "skipped" })).toBe("not applicable");
+    expect(describeKsef({ ...baseRow, is_company: true, status: "skipped" })).toBe(
+      "not applicable",
+    );
+  });
+
+  it("is 'not required' for a terminal consumer row with no recorded decision (adopted/backfilled)", () => {
+    expect(describeKsef({ ...baseRow, is_company: false, status: "done" })).toBe("not required");
+  });
+
+  it("does not guess for a terminal company row with no recorded decision", () => {
+    expect(describeKsef({ ...baseRow, is_company: true, status: "done" })).toBe(
+      "not tracked by this plugin",
+    );
+  });
+
+  it("is still 'pending' for a row that has not reached the decision step yet", () => {
+    expect(describeKsef({ ...baseRow, status: "pending" })).toBe("pending");
+    expect(describeKsef({ ...baseRow, status: "needs_review" })).toBe("pending");
   });
 });

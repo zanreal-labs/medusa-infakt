@@ -82,6 +82,51 @@ const errorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+/**
+ * What to show for the KSeF field, honestly.
+ *
+ * `ksef_required` is decided once, in the pipeline's submit-create step (see
+ * `decideKsef` in `src/lib/invoicing/ksef.ts`), and stays null only for rows that
+ * never ran that step: one adopted through the crash-window recovery flow, or one
+ * backfilled straight into the ledger as an already-issued, already-adopted
+ * record. Falling back to "pending" for those was the bug - it told an operator a
+ * filing was queued for an invoice that will never be submitted, which is exactly
+ * what a consumer invoice (no NIP) is.
+ *
+ * With no live decision to read, this reasons from what IS known:
+ *  - `skipped` means no invoice was ever issued for the order, so there is
+ *    nothing to file, full stop - "not applicable" regardless of buyer type.
+ *  - `done` with a consumer buyer (`is_company` false) will never need KSeF
+ *    under the NIP-based rule the plugin itself applies, so it renders exactly
+ *    like a live "not required" decision.
+ *  - `done` with a company buyer is genuinely ambiguous - the row may already be
+ *    filed outside this plugin, or may still need it - so it says so rather than
+ *    guessing either way.
+ *  - anything still in flight (`pending`, `processing`, `needs_review`) has not
+ *    reached the decision step yet, so "pending" is still the honest answer.
+ */
+export const describeKsef = (row: InfaktInvoiceRow): string => {
+  if (row.ksef_number) {
+    return row.ksef_number;
+  }
+  if (row.ksef_status) {
+    return row.ksef_status;
+  }
+  if (row.ksef_required === false) {
+    return "not required";
+  }
+  if (row.ksef_required === true) {
+    return "pending";
+  }
+  if (row.status === "skipped") {
+    return "not applicable";
+  }
+  if (row.status === "done") {
+    return row.is_company ? "not tracked by this plugin" : "not required";
+  }
+  return "pending";
+};
+
 const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
   const orderId = data?.id;
   const [row, setRow] = useState<InfaktInvoiceRow | undefined>();
@@ -279,10 +324,7 @@ const RowDetail = ({
   busy: boolean;
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
 }) => {
-  const ksef =
-    row.ksef_required === false
-      ? "not required"
-      : (row.ksef_number ?? row.ksef_status ?? "pending");
+  const ksef = describeKsef(row);
   const detail = row.in_crash_window
     ? "A previous create may have reached inFakt. Look for a stray invoice there, then link it or clear this row."
     : (row.last_error ?? row.skip_reason ?? row.ksef_decision_reason ?? null);
