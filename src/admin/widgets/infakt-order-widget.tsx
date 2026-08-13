@@ -38,9 +38,12 @@ import type {
  *  - an API refusal (a 409 from an action): a dismissible inline message, never a
  *    thrown, crashed panel.
  *
- * It reads only routes that answer 200 in every state and never touch the inFakt
- * client, so an unconfigured or paused plugin renders this widget as calmly as a
- * fully active one.
+ * The initial load reads only routes that answer 200 in every state and never
+ * touch the inFakt client, so an unconfigured or paused plugin renders this
+ * widget as calmly as a fully active one. The one exception is "View PDF" -
+ * shown only once a row carries a usable identifier, and fetched on demand
+ * through the plugin's own PDF route rather than a link straight to inFakt, so
+ * a resolution failure surfaces inline instead of a dead navigation.
  */
 
 const STATUS_COLOR: Record<InvoiceStatus, "green" | "orange" | "red" | "grey" | "blue"> = {
@@ -315,6 +318,25 @@ const describeInactive = (reason: InfaktSettings["reason"]): string => {
   }
 };
 
+/**
+ * The exact signature a row backfilled straight into the ledger carries, never
+ * produced by the normal `adopt` flow: `planAdopt` always writes `invoice_uuid`
+ * in the same patch as `adopted_at` (see `src/lib/invoicing/operator-actions.ts`),
+ * so the two coming apart means a row that reached the ledger some other way -
+ * the 24 historical invoices imported from intra, in production.
+ *
+ * That import wrote an audit note straight into whichever text column the
+ * script reached for, worded for a database read, not an operator glancing at
+ * an order: "backfilled from intra (invoice_source=infakt); historical
+ * document, not issued by this plugin". This flag is what the display-only fix
+ * hangs off - it does not care WHICH column carries that text, only that a row
+ * with this exact shape should not surface its free-text detail line at all.
+ * Whatever wrote it stays in the database as the audit trail; only the admin
+ * widget stops rendering it.
+ */
+export const isHistoricalImport = (row: InfaktInvoiceRow): boolean =>
+  Boolean(row.adopted_at) && !row.invoice_uuid;
+
 const RowDetail = ({
   row,
   busy,
@@ -327,7 +349,9 @@ const RowDetail = ({
   const ksef = describeKsef(row);
   const detail = row.in_crash_window
     ? "A previous create may have reached inFakt. Look for a stray invoice there, then link it or clear this row."
-    : (row.last_error ?? row.skip_reason ?? row.ksef_decision_reason ?? null);
+    : isHistoricalImport(row)
+      ? null
+      : (row.last_error ?? row.skip_reason ?? row.ksef_decision_reason ?? null);
 
   return (
     <div className="flex flex-col gap-y-4">
@@ -343,6 +367,8 @@ const RowDetail = ({
         </Field>
       </dl>
 
+      <PdfLink row={row} />
+
       {detail ? (
         <Text className="text-ui-fg-subtle" size="small">
           {detail}
@@ -351,6 +377,72 @@ const RowDetail = ({
       ) : null}
 
       <RowActions busy={busy} onAct={onAct} row={row} />
+    </div>
+  );
+};
+
+/**
+ * A button to view the invoice PDF, shown if and only if this row can produce
+ * a real document reference - never a link that only fails once clicked.
+ *
+ * `invoice_uuid` set: the direct case, every invoice this pipeline issued or an
+ * operator adopted through the crash-window flow.
+ *
+ * `invoice_uuid` null but `invoice_number` set: the shape of a historical row
+ * backfilled straight into the ledger. The server resolves the PDF by number
+ * through inFakt's invoice search - see `GET /admin/infakt/invoices/:id/pdf` -
+ * so the button still appears, and a failed resolution surfaces as the inline
+ * error below it, never a dead navigation.
+ *
+ * Neither set: nothing renders. There is no identifier to try.
+ */
+const PdfLink = ({ row }: { row: InfaktInvoiceRow }) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  if (!(row.invoice_uuid || row.invoice_number)) {
+    return null;
+  }
+
+  const open = async () => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const res = await fetch(`/admin/infakt/invoices/${row.id}/pdf`, { credentials: "include" });
+      if (!res.ok) {
+        // A thrown `MedusaError` (the not-found cases) is serialized by the
+        // framework's own error handler as `{ message, type, code }`; the
+        // disabled-plugin refusal below writes `{ error, id }` by hand, matching
+        // the rest of this plugin's 409 responses. Read whichever is present.
+        const body = (await res.json().catch(() => undefined)) as
+          | { message?: string; error?: string }
+          | undefined;
+        throw new Error(
+          body?.message ?? body?.error ?? `The PDF could not be fetched (HTTP ${res.status}).`,
+        );
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setError(errorMessage(err, "Could not open the invoice PDF."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-y-1">
+      <div>
+        <Button disabled={busy} onClick={() => void open()} size="small" variant="secondary">
+          View PDF
+        </Button>
+      </div>
+      {error ? (
+        <Text className="text-ui-fg-error" size="small">
+          {error}
+        </Text>
+      ) : null}
     </div>
   );
 };

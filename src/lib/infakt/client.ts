@@ -280,6 +280,25 @@ export class InfaktClient {
   }
 
   /**
+   * GET /invoices.json?q[number_eq]={number} - resolve an invoice by its
+   * human-readable number, Ransack-style (github.com/infakt/API readme.md,
+   * "Filtrowanie": `GET /api/v3/invoices.json?q[number_eq]=1/09/2024`).
+   *
+   * This is the only way to reach an invoice through this API when the uuid
+   * is not known - every other endpoint, including the PDF one, is uuid-keyed.
+   * An empty match returns `undefined` rather than throwing: not finding an
+   * invoice by number is an expected outcome for a caller that is only
+   * guessing at an identifier, not a failed request.
+   */
+  async findInvoiceByNumber(number: string): Promise<InfaktInvoice | undefined> {
+    const raw = await this.request<InvoiceListResponse>("GET", "/invoices.json", {
+      query: { "q[number_eq]": number },
+    });
+    const [first] = raw?.entities ?? [];
+    return first ? mapInvoice(first) : undefined;
+  }
+
+  /**
    * GET /invoices/{uuid}/pdf.json - the response is a raw binary PDF
    * (github.com/infakt/API readme.md, "Pobranie PDF").
    *

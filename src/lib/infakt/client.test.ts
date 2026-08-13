@@ -191,6 +191,28 @@ describe("InfaktClient", () => {
     await expect(new InfaktClient({ apiKey: "KEY" }).listInvoices()).resolves.toEqual([]);
   });
 
+  it("findInvoiceByNumber filters with the Ransack q[number_eq] parameter", async () => {
+    const fetchImpl = stubFetch(() =>
+      apiJson(200, {
+        entities: [{ number: "1/09/2026", uuid: "u-1" }],
+        metainfo: { count: 1, total_count: 1 },
+      }),
+    );
+    const client = new InfaktClient({ apiKey: "KEY" });
+    const invoice = await client.findInvoiceByNumber("1/09/2026");
+    const url = String(fetchImpl.mock.calls[0]?.[0]);
+    expect(url).toContain("/invoices.json?");
+    expect(url).toContain(`q%5Bnumber_eq%5D=1%2F09%2F2026`);
+    expect(invoice?.uuid).toBe("u-1");
+  });
+
+  it("findInvoiceByNumber returns undefined when inFakt has no match", async () => {
+    stubFetch(() => apiJson(200, { entities: [], metainfo: { total_count: 0 } }));
+    await expect(
+      new InfaktClient({ apiKey: "KEY" }).findInvoiceByNumber("no-such-number"),
+    ).resolves.toBeUndefined();
+  });
+
   it("getInvoicePdf returns the binary body as Uint8Array", async () => {
     // "%PDF" magic bytes
     const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);

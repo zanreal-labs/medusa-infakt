@@ -14,7 +14,7 @@ vi.mock("../../lib/sdk", () => ({ sdk: { client: { fetch: fetchMock } } }));
 
 const widgetModule = await import("../infakt-order-widget");
 const InfaktOrderWidget = widgetModule.default;
-const { describeKsef } = widgetModule;
+const { describeKsef, isHistoricalImport } = widgetModule;
 
 const settings = (over: Partial<InfaktSettings> = {}): InfaktSettings => ({
   api_key_configured: true,
@@ -162,6 +162,230 @@ describe("order invoicing widget", () => {
     expect(screen.queryByText("pending")).toBeNull();
   });
 
+  it("hides the backfill audit note for the 24 historical rows' exact shape, wherever it was written", async () => {
+    const backfillNote =
+      "backfilled from intra (invoice_source=infakt); historical document, not issued by this plugin";
+    wire(
+      [
+        {
+          adopted_at: new Date().toISOString(),
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2024/1",
+          invoice_uuid: null,
+          is_company: false,
+          last_error: backfillNote,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText("FV/2024/1")).toBeTruthy();
+    expect(screen.queryByText(new RegExp(backfillNote, "u"))).toBeNull();
+    expect(screen.queryByText(/backfilled from intra/u)).toBeNull();
+  });
+
+  it("still shows a live error or skip reason for a row that is not the historical-import shape", async () => {
+    wire(
+      [
+        {
+          attempts: 1,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          is_company: false,
+          order_id: "order_1",
+          skip_reason: "skipped by an operator: test order",
+          status: "skipped",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText(/skipped by an operator: test order/)).toBeTruthy();
+  });
+
+  it("offers a View PDF button for a normally issued invoice", async () => {
+    wire(
+      [
+        {
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2026/1",
+          invoice_uuid: "uuid-1",
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByRole("button", { name: "View PDF" })).toBeTruthy();
+  });
+
+  it("offers a View PDF button for an adopted/historical row that only carries an invoice number", async () => {
+    wire(
+      [
+        {
+          adopted_at: new Date().toISOString(),
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2019/40",
+          invoice_uuid: null,
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByRole("button", { name: "View PDF" })).toBeTruthy();
+  });
+
+  it("never renders a View PDF button when a row has no usable inFakt identifier", async () => {
+    wire(
+      [
+        {
+          adopted_at: new Date().toISOString(),
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: null,
+          invoice_uuid: null,
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    await screen.findByText(/\(adopted\/imported\)/);
+    expect(screen.queryByRole("button", { name: "View PDF" })).toBeNull();
+  });
+
+  it("fetches and opens the PDF through the plugin's own route, never a raw inFakt URL", async () => {
+    const blob = new Blob(["%PDF"], { type: "application/pdf" });
+    const rawFetchMock = vi.fn().mockResolvedValue({ blob: () => Promise.resolve(blob), ok: true });
+    vi.stubGlobal("fetch", rawFetchMock);
+    vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn().mockReturnValue("blob:mock") });
+    const openMock = vi.fn();
+    vi.stubGlobal("open", openMock);
+
+    wire(
+      [
+        {
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2026/1",
+          invoice_uuid: "uuid-1",
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    const button = await screen.findByRole("button", { name: "View PDF" });
+    button.click();
+
+    await vi.waitFor(() => expect(openMock).toHaveBeenCalledWith("blob:mock", "_blank", "noopener,noreferrer"));
+    expect(rawFetchMock).toHaveBeenCalledWith("/admin/infakt/invoices/inv_1/pdf", {
+      credentials: "include",
+    });
+
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces a failed PDF fetch inline, never as a dead navigation - a thrown MedusaError's `message`", async () => {
+    // A thrown `MedusaError` (the route's not-found cases) is serialized by
+    // Medusa's own error-handler middleware as `{ message, type, code }` - see
+    // node_modules/@medusajs/framework's `errorHandler`.
+    const rawFetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({
+          message: "inFakt has no invoice numbered FV/2019/40.",
+          type: "not_found",
+        }),
+      ok: false,
+      status: 404,
+    });
+    vi.stubGlobal("fetch", rawFetchMock);
+
+    wire(
+      [
+        {
+          adopted_at: new Date().toISOString(),
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2019/40",
+          invoice_uuid: null,
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    const button = await screen.findByRole("button", { name: "View PDF" });
+    button.click();
+
+    expect(await screen.findByText(/inFakt has no invoice numbered FV\/2019\/40/)).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("also reads the route's hand-written `error` field, for the disabled-plugin 409", async () => {
+    const rawFetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({ error: "the plugin is disabled (no `apiKey` configured)", id: "inv_1" }),
+      ok: false,
+      status: 409,
+    });
+    vi.stubGlobal("fetch", rawFetchMock);
+
+    wire(
+      [
+        {
+          attempts: 0,
+          completed_at: new Date().toISOString(),
+          id: "inv_1",
+          in_crash_window: false,
+          invoice_number: "FV/2026/1",
+          invoice_uuid: "uuid-1",
+          is_company: false,
+          order_id: "order_1",
+          status: "done",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    const button = await screen.findByRole("button", { name: "View PDF" });
+    button.click();
+
+    expect(await screen.findByText(/plugin is disabled/)).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+
   it("shows a consumer invoice's KSeF field as not required, never as pending", async () => {
     wire(
       [
@@ -261,5 +485,32 @@ describe("describeKsef", () => {
   it("is still 'pending' for a row that has not reached the decision step yet", () => {
     expect(describeKsef({ ...baseRow, status: "pending" })).toBe("pending");
     expect(describeKsef({ ...baseRow, status: "needs_review" })).toBe("pending");
+  });
+});
+
+describe("isHistoricalImport", () => {
+  const baseRow = {
+    attempts: 0,
+    id: "inv_1",
+    in_crash_window: false,
+    is_company: false,
+    order_id: "order_1",
+    status: "done",
+  } as InfaktInvoiceRow;
+
+  it("is true for the exact shape the 24 backfilled rows carry: adopted, no uuid", () => {
+    expect(isHistoricalImport({ ...baseRow, adopted_at: "2024-01-01", invoice_uuid: null })).toBe(
+      true,
+    );
+  });
+
+  it("is false once a real adopt has linked a uuid, even though adopted_at is also set", () => {
+    expect(
+      isHistoricalImport({ ...baseRow, adopted_at: "2024-01-01", invoice_uuid: "uuid-1" }),
+    ).toBe(false);
+  });
+
+  it("is false for an ordinary row that was never adopted", () => {
+    expect(isHistoricalImport({ ...baseRow, adopted_at: null, invoice_uuid: null })).toBe(false);
   });
 });
