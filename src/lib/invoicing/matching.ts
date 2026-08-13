@@ -65,8 +65,16 @@ export interface MatchOrderInput {
   email?: string;
   /** "First Last", required (and only used) when not `isCompany`. */
   fullName?: string;
-  /** Gross total the order was billed, integer minor units. */
-  grossTotal: number;
+  /**
+   * Gross total the order was billed, integer minor units.
+   *
+   * Null when the amount could not be read off the order. It is deliberately
+   * NOT defaulted to 0 by the mappers that build this: 0 is a real amount that
+   * a zero-value invoice would match, and every other amount would read as a
+   * confident no-match against a number nobody ever charged. A null loses every
+   * candidate at `totalsMatch`, which is the only safe answer.
+   */
+  grossTotal: number | null;
   currency?: string;
   items: MatchOrderItem[];
   /**
@@ -189,6 +197,9 @@ export function filterByIdentity(
 
 /** Exact integer equality, no tolerance. Currency must agree when both state one. */
 export function totalsMatch(order: MatchOrderInput, candidate: MatchInvoiceCandidate): boolean {
+  if (order.grossTotal === null) {
+    return false;
+  }
   if (candidate.grossPrice === undefined || candidate.grossPrice !== order.grossTotal) {
     return false;
   }
@@ -335,7 +346,9 @@ function buildReasons(
     : `Buyer match (email/name): ${identityCount} invoice(s)`;
   return [
     identityReason,
-    `Gross total ${order.grossTotal} matched on ${totalCount} of those`,
+    order.grossTotal === null
+      ? "Gross total could not be read off the order, so no invoice could match on amount"
+      : `Gross total ${order.grossTotal} matched on ${totalCount} of those`,
     `Line positions confirmed on ${confirmedCount} of those`,
   ];
 }

@@ -238,7 +238,10 @@ export function toReconcileOrder(
     displayId: order.display_id ?? null,
     email: order.email ?? undefined,
     fullName: fullNameOf(order),
-    grossTotal: bigNumberToMinorUnits(order.total) ?? 0,
+    // Never `?? 0`. An unreadable total is a fact about the read, not a fact
+    // about the order, and defaulting it here is what made every order compare
+    // as worth nothing - matching an invoice on amount then could never succeed.
+    grossTotal: bigNumberToMinorUnits(order.total),
     isCompany: Boolean(taxId),
     items: (order.items ?? []).map((item) => ({
       name: lineItemName(item),
@@ -274,6 +277,22 @@ function planOne(
   invoices: MatchInvoiceCandidate[],
   options: ReconcileOptions,
 ): AdoptionPlanEntry {
+  // An order whose total could not be read cannot clear the amount gate, and
+  // must not be silently compared against 0. Say so instead of reporting the
+  // ordinary "nothing matched the gross total 0", which reads like a genuine
+  // absence of candidates while actually being a data problem on this side.
+  if (order.grossTotal === null) {
+    return {
+      candidates: [],
+      decision: "no_match",
+      displayId: order.displayId,
+      orderId: order.orderId,
+      reasons: [
+        "The order's gross total could not be read, so no invoice can be matched on amount. Refusing rather than comparing every candidate against 0.",
+      ],
+    };
+  }
+
   const inWindow = filterByDateWindow(order, invoices, options.dateToleranceDays);
   const byIdentity = filterByIdentity(order, inWindow);
   const byTotal = filterByTotal(order, byIdentity);

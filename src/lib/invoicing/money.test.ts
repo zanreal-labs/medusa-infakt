@@ -1,5 +1,19 @@
+import { BigNumber } from "@medusajs/framework/utils";
 import { describe, expect, it } from "vitest";
 import { bigNumberToMinorUnits, isCalendarDate, toMinorUnits, warsawDate } from "./money";
+
+/**
+ * `BigNumber` is imported from the installed Medusa package on purpose, and is
+ * never hand-modelled as a literal here.
+ *
+ * A hand-written `{ value: "133.44" }` was exactly how this function's object
+ * case was tested before, and it passed while production returned 0 for every
+ * order: what the query layer actually hands back for `order.total` is a
+ * `BigNumber` INSTANCE, which carries no `value` key of its own. A fixture that
+ * models the shape rather than constructing it can only ever prove that the
+ * code agrees with the fixture. The assertions below therefore start by pinning
+ * what the real class looks like, so this file fails if Medusa changes it.
+ */
 
 describe("toMinorUnits", () => {
   it("converts floats and numeric strings without drift", () => {
@@ -35,6 +49,33 @@ describe("toMinorUnits", () => {
 });
 
 describe("bigNumberToMinorUnits", () => {
+  it("is handed a BigNumber whose own keys do NOT include `value`", () => {
+    // The premise of the bug, asserted rather than assumed. If this ever fails,
+    // the instance case below is testing something Medusa no longer returns.
+    const total = new BigNumber("149.00");
+    expect(Object.keys(total)).toEqual(["numeric_", "raw_", "bignumber_"]);
+    expect("value" in total).toBe(false);
+    expect(typeof total.valueOf()).toBe("number");
+  });
+
+  it("reads a real Medusa BigNumber instance", () => {
+    expect(bigNumberToMinorUnits(new BigNumber("133.44"))).toBe(13_344);
+    expect(bigNumberToMinorUnits(new BigNumber(149))).toBe(14_900);
+    expect(bigNumberToMinorUnits(new BigNumber({ precision: 20, value: "131.00" }))).toBe(13_100);
+  });
+
+  it("reads a zero and a negative BigNumber as amounts, not as failures", () => {
+    expect(bigNumberToMinorUnits(new BigNumber(0))).toBe(0);
+    expect(bigNumberToMinorUnits(new BigNumber("-12.50"))).toBe(-1250);
+  });
+
+  it("reads a BigNumber that lost its prototype crossing a serialization boundary", () => {
+    // A spread, a structured clone or a workflow step result keeps the private
+    // fields and loses every accessor. Still an amount, still readable.
+    expect(bigNumberToMinorUnits({ ...new BigNumber("133.44") })).toBe(13_344);
+    expect(bigNumberToMinorUnits(structuredClone({ ...new BigNumber("149.00") }))).toBe(14_900);
+  });
+
   it("unwraps the raw { value } object form", () => {
     expect(bigNumberToMinorUnits({ precision: 20, value: "133.44" })).toBe(13_344);
     expect(bigNumberToMinorUnits({ value: 133.44 })).toBe(13_344);
@@ -51,6 +92,10 @@ describe("bigNumberToMinorUnits", () => {
     expect(bigNumberToMinorUnits({})).toBeNull();
     expect(bigNumberToMinorUnits([])).toBeNull();
     expect(bigNumberToMinorUnits({ value: "abc" })).toBeNull();
+    expect(bigNumberToMinorUnits(true)).toBeNull();
+    // An object whose `valueOf()` happens to yield a number is not an amount.
+    // Only something that identifies itself as a BigNumber is read that way.
+    expect(bigNumberToMinorUnits(new Date("2026-08-10T11:05:00Z"))).toBeNull();
   });
 });
 

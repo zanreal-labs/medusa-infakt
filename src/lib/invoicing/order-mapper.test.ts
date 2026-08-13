@@ -1,3 +1,4 @@
+import { BigNumber } from "@medusajs/framework/utils";
 import { describe, expect, it } from "vitest";
 import { buildInfaktInvoicePayload } from "./builder";
 import { defaultNipExtractor } from "./nip";
@@ -177,6 +178,26 @@ describe("toInvoiceOrderInput", () => {
     expect(input.shipping?.[0]?.grossTotal).toBe(9.99);
   });
 
+  it("reads real BigNumber instances everywhere", () => {
+    // Every amount here is constructed by the installed Medusa package, which is
+    // what `query.graph` hands back. Its instances expose `numeric_`, `raw_` and
+    // `bignumber_` and no `value` key, so only a real one exercises this path.
+    const input = toInvoiceOrderInput(
+      medusaOrder({
+        items: [
+          { product_title: "X", quantity: 1, total: new BigNumber("61.73"), unit_price: new BigNumber("61.73") },
+        ],
+        shipping_methods: [{ name: "Kurier", total: new BigNumber("9.99") }],
+        total: new BigNumber("71.72"),
+      }) as MedusaOrderLike,
+      "PLN",
+    );
+    expect(input.total).toBe(71.72);
+    expect(input.items[0]?.grossTotal).toBe(61.73);
+    expect(input.items[0]?.unitPrice).toBe(61.73);
+    expect(input.shipping?.[0]?.grossTotal).toBe(9.99);
+  });
+
   it("falls back to the configured currency when the order states none", () => {
     expect(toInvoiceOrderInput(medusaOrder({ currency_code: null }), "PLN").currency).toBe("PLN");
   });
@@ -296,6 +317,32 @@ describe("mapper plus builder, end to end", () => {
       expect(result.isCompany).toBe(true);
       expect(result.nip).toBe(VALID_NIP);
       expect(result.payload.client_business_activity_kind).toBe("other_business");
+    }
+  });
+
+  it("issues an invoice for an order read exactly as the query layer returns it", () => {
+    // The whole chain against real BigNumber amounts: the lines have to sum to
+    // the order total in minor units, which is impossible if any one of them
+    // reads as null and gets defaulted.
+    const order = medusaOrder({
+      items: [
+        { product_title: "Program antywirusowy", quantity: 1, total: new BigNumber("61.73") },
+        { product_title: "Pendrive", quantity: 2, total: new BigNumber("61.72") },
+      ],
+      shipping_methods: [{ name: "Paczkomat InPost", total: new BigNumber("9.99") }],
+      total: new BigNumber("133.44"),
+    });
+    const result = buildInfaktInvoicePayload(
+      toInvoiceOrderInput(order, "PLN"),
+      toInvoiceBuyerInput(order, defaultNipExtractor),
+      config,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.totalMinor).toBe(13_344);
+      expect(result.payload.services.map((service) => service.gross_price)).toEqual([
+        6173, 6172, 999,
+      ]);
     }
   });
 

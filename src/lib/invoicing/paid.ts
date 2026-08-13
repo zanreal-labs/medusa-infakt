@@ -60,6 +60,12 @@ export interface PaidGateResult {
  *
  * Canceled payments are skipped: a canceled payment's `captured_amount` can
  * still be non-zero from before the cancellation.
+ *
+ * The defaults below only ever move the answer AWAY from "paid": an absent
+ * refund really is no refund, and an unreadable capture counts for nothing, so
+ * the worst case is an order deferred for another tick rather than an invoice
+ * issued against a payment that did not happen. The order total is the one value
+ * that must never be defaulted, and `evaluatePaidGate` refuses it outright.
  */
 export function capturedMinorUnits(order: PaidGateOrder): number {
   let captured = 0;

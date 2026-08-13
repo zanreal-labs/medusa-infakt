@@ -1,3 +1,4 @@
+import { BigNumber } from "@medusajs/framework/utils";
 import { describe, expect, it } from "vitest";
 import { capturedMinorUnits, evaluatePaidGate } from "./paid";
 import type { PaidGateOrder } from "./paid";
@@ -101,6 +102,32 @@ describe("capturedMinorUnits", () => {
     ).toBe(13_344);
   });
 
+  it("reads real BigNumber instances, which is what the query layer returns", () => {
+    // Constructed from the installed Medusa package, not modelled as a literal:
+    // an instance has no `value` key of its own, so a hand-written fixture
+    // cannot show whether this works.
+    expect(
+      capturedMinorUnits(
+        order({
+          payment_collections: [
+            {
+              captured_amount: new BigNumber("133.44"),
+              refunded_amount: new BigNumber("33.44"),
+              status: "completed",
+            },
+          ],
+        }),
+      ),
+    ).toBe(10_000);
+    expect(
+      capturedMinorUnits(
+        order({
+          payment_collections: [{ payments: [{ captured_amount: new BigNumber("133.44") }] }],
+        }),
+      ),
+    ).toBe(13_344);
+  });
+
   it("reports zero for an order with no payment collections", () => {
     expect(capturedMinorUnits(order({ payment_collections: [] }))).toBe(0);
     expect(capturedMinorUnits(order({ payment_collections: null }))).toBe(0);
@@ -161,6 +188,18 @@ describe("evaluatePaidGate", () => {
     const result = evaluatePaidGate({ payment_collections: [], total: 0 });
     expect(result.fullyPaid).toBe(true);
     expect(result.reason).toContain("nothing to capture");
+  });
+
+  it("passes an order whose amounts are all real BigNumber instances", () => {
+    const result = evaluatePaidGate({
+      payment_collections: [
+        { captured_amount: new BigNumber("149.00"), status: "completed" },
+      ],
+      total: new BigNumber("149.00"),
+    });
+    expect(result.totalMinor).toBe(14_900);
+    expect(result.capturedMinor).toBe(14_900);
+    expect(result.fullyPaid).toBe(true);
   });
 
   it("does NOT pass an unreadable total", () => {

@@ -137,6 +137,9 @@ export function buildInfaktInvoicePayload(
   }
 
   for (const shipping of order.shipping ?? []) {
+    // The one `?? 0` here that is safe: an unreadable shipping cost drops the
+    // line, the lines then sum short of the order total, and the total-match
+    // guard below refuses the invoice. It cannot become an amount on a document.
     const shippingMinor = toMinorUnits(shipping.grossTotal) ?? 0;
     // A free shipping method is not a line. inFakt accepts a zero-gross
     // position, but a "Dostawa - 0,00 zl" row on a customer's invoice is noise,

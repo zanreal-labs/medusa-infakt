@@ -154,6 +154,17 @@ describe("stage 2: gross total", () => {
     expect(totalsMatch(consumerOrder(), candidate({ currency: "EUR" }))).toBe(false);
   });
 
+  it("matches nothing when the order's total could not be read", () => {
+    // Null is "unknown", not "zero". A zero-priced invoice must not clear the
+    // amount gate for an order whose amount nobody managed to read.
+    expect(totalsMatch(consumerOrder({ grossTotal: null }), candidate({ grossPrice: 0 }))).toBe(
+      false,
+    );
+    expect(
+      filterByTotal(consumerOrder({ grossTotal: null }), [candidate(), candidate({ grossPrice: 0, uuid: "u-2" })]),
+    ).toHaveLength(0);
+  });
+
   it("does not reject when either side omits its currency", () => {
     expect(totalsMatch(consumerOrder({ currency: undefined }), candidate())).toBe(true);
     expect(totalsMatch(consumerOrder(), candidate({ currency: undefined }))).toBe(true);

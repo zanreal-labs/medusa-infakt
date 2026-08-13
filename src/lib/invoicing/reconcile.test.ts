@@ -1,3 +1,4 @@
+import { BigNumber } from "@medusajs/framework/utils";
 import { describe, expect, it } from "vitest";
 import { defaultNipExtractor } from "./nip";
 import type { MatchInvoiceCandidate } from "./matching";
@@ -155,6 +156,56 @@ describe("an unambiguous match", () => {
     );
     expect(entry.decision).toBe("adopt");
     expect(entry.evidence?.identity).toBe("nip");
+  });
+});
+
+describe("amounts as Medusa actually returns them", () => {
+  it("adopts an order whose total is a real BigNumber, as the query layer returns it", () => {
+    // The case this was blind to: `order.total` is a BigNumber
+    // INSTANCE, whose own keys are `numeric_`, `raw_` and `bignumber_` and which
+    // carries no `value` key. Read as null and defaulted to 0, the order reported
+    // "1 of those matched the buyer, 0 of those matched the gross total 0" - the
+    // amount was the only gate it failed. Built from the installed Medusa
+    // package rather than hand-written, because a literal cannot show this.
+    const medusaOrder: MedusaOrderLike = {
+      billing_address: { first_name: "Jan", last_name: "Kowalski" },
+      created_at: "2026-08-10T11:05:00Z",
+      currency_code: "pln",
+      display_id: 112,
+      email: "buyer-synthetic@allegromail.pl",
+      id: "order_112",
+      items: [{ product_title: "Dysk SSD 1TB", quantity: 1 }],
+      total: new BigNumber("149.00"),
+    };
+    const mapped = toReconcileOrder(medusaOrder, defaultNipExtractor, "PLN");
+    expect(mapped.grossTotal).toBe(14_900);
+
+    const [entry] = plan([mapped], [invoice()]);
+    expect(entry.decision).toBe("adopt");
+    expect(entry.evidence?.gross_total_minor).toBe(14_900);
+  });
+
+  it("REFUSES to compare an unreadable total against zero", () => {
+    // Null means "I could not read this", never "this order is worth nothing".
+    // A zero here would sail through the amount gate against any zero-value
+    // invoice, and read as a confident no-match against every other one.
+    const mapped = toReconcileOrder(
+      {
+        created_at: "2026-08-10T11:05:00Z",
+        email: "buyer-synthetic@allegromail.pl",
+        id: "order_112",
+        total: { not: "an amount" },
+      } as MedusaOrderLike,
+      defaultNipExtractor,
+      "PLN",
+    );
+    expect(mapped.grossTotal).toBeNull();
+
+    const [entry] = plan([mapped], [invoice({ grossPrice: 0 })]);
+    expect(entry.decision).toBe("no_match");
+    expect(entry.candidates).toEqual([]);
+    expect(entry.reasons[0]).toContain("could not be read");
+    expect(entry.reasons[0]).not.toContain("matched the gross total 0");
   });
 });
 
