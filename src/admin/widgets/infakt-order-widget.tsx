@@ -108,7 +108,7 @@ const errorMessage = (error: unknown, fallback: string): string => {
  *  - anything still in flight (`pending`, `processing`, `needs_review`) has not
  *    reached the decision step yet, so "pending" is still the honest answer.
  */
-export const describeKsef = (row: InfaktInvoiceRow): string => {
+export const describeKsef = (row: InfaktInvoiceRow): string | null => {
   if (row.ksef_number) {
     return row.ksef_number;
   }
@@ -116,7 +116,11 @@ export const describeKsef = (row: InfaktInvoiceRow): string => {
     return row.ksef_status;
   }
   if (row.ksef_required === false) {
-    return "not required";
+    // A consumer invoice is outside KSeF by law, permanently. There is no state
+    // to report and nothing an operator can act on, so the row says nothing
+    // rather than explaining an absence. The Buyer field already reads
+    // "consumer", and the decision plus its reason stay on the record for audit.
+    return null;
   }
   if (row.ksef_required === true) {
     // A terminal adopted row is the one case where "required" does not imply
@@ -129,7 +133,7 @@ export const describeKsef = (row: InfaktInvoiceRow): string => {
     return "not applicable";
   }
   if (row.status === "done") {
-    return row.is_company ? "not tracked by this plugin" : "not required";
+    return row.is_company ? "not tracked by this plugin" : null;
   }
   return "pending";
 };
@@ -355,7 +359,10 @@ const RowDetail = ({
     ? "A previous create may have reached inFakt. Look for a stray invoice there, then link it or clear this row."
     : isHistoricalImport(row)
       ? null
-      : (row.last_error ?? row.skip_reason ?? row.ksef_decision_reason ?? null);
+      : // Deliberately NOT ksef_decision_reason: for a consumer invoice that
+        // sentence only ever restates that KSeF does not apply, which is noise
+        // on every consumer order. It stays on the record for an audit.
+        (row.last_error ?? row.skip_reason ?? null);
 
   return (
     <div className="flex flex-col gap-y-4">
@@ -363,7 +370,7 @@ const RowDetail = ({
         <Field label="Invoice number">
           {row.invoice_number ?? (row.invoice_uuid ? "issued (number pending)" : "-")}
         </Field>
-        <Field label="KSeF">{ksef}</Field>
+        {ksef === null ? null : <Field label="KSeF">{ksef}</Field>}
         <Field label="Buyer">{row.is_company ? "company (B2B)" : "consumer"}</Field>
         <Field label={row.status === "skipped" ? "Skipped on" : "Issued on"}>
           {formatDate(row.completed_at)}

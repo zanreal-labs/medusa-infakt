@@ -158,7 +158,7 @@ describe("order invoicing widget", () => {
     // `ksef_required` is null here - the same shape as the 24 historical
     // invoices imported straight into the ledger. It must not claim a filing
     // is queued for a consumer invoice that will never be filed.
-    expect(await screen.findByText("not required")).toBeTruthy();
+    expect(screen.queryByText("KSeF")).toBeNull();
     expect(screen.queryByText("pending")).toBeNull();
   });
 
@@ -386,7 +386,7 @@ describe("order invoicing widget", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows a consumer invoice's KSeF field as not required, never as pending", async () => {
+  it("shows a consumer invoice no KSeF field at all, never a pending one", async () => {
     wire(
       [
         {
@@ -405,7 +405,8 @@ describe("order invoicing widget", () => {
     );
     render(<InfaktOrderWidget data={{ id: "order_1" }} />);
     expect(await screen.findByText("consumer")).toBeTruthy();
-    expect(screen.getByText("not required")).toBeTruthy();
+    expect(screen.queryByText("KSeF")).toBeNull();
+    expect(screen.queryByText("pending")).toBeNull();
     expect(screen.queryByText("pending")).toBeNull();
   });
 
@@ -453,9 +454,9 @@ describe("describeKsef", () => {
     expect(describeKsef({ ...baseRow, ksef_status: "sent", status: "processing" })).toBe("sent");
   });
 
-  it("is 'not required' for a decided consumer invoice", () => {
+  it("says nothing for a decided consumer invoice: KSeF will never touch it", () => {
     expect(describeKsef({ ...baseRow, ksef_required: false, status: "done" })).toBe(
-      "not required",
+      null,
     );
   });
 
@@ -499,8 +500,8 @@ describe("describeKsef", () => {
     );
   });
 
-  it("is 'not required' for a terminal consumer row with no recorded decision (adopted/backfilled)", () => {
-    expect(describeKsef({ ...baseRow, is_company: false, status: "done" })).toBe("not required");
+  it("says nothing for a terminal consumer row with no recorded decision (adopted/backfilled)", () => {
+    expect(describeKsef({ ...baseRow, is_company: false, status: "done" })).toBeNull();
   });
 
   it("does not guess for a terminal company row with no recorded decision", () => {
