@@ -44,9 +44,10 @@ const ENVIRONMENT_OPTIONS: readonly { value: Environment; label: string }[] = [
  * Owns every setting that used to be readable but not writable from the admin:
  * currency, the KSeF filing condition, the trigger event, the environment, and
  * the `apiKey` itself, alongside the pause switch this page has always had.
- * Every field here is bound to `InfaktSettings` (the `infakt_settings` table),
- * not to `medusa-config.ts` - saving one takes effect on the very next
- * subscriber invocation or worker tick, with no redeploy and no restart. See
+ * Every field here is bound to `InfaktSettings` (the `infakt_settings` table)
+ * rather than to the plugin's install-time options - saving one takes effect on
+ * the very next subscriber invocation or worker tick, with no redeploy and no
+ * restart. See
  * `mergeEffectiveOptions` in `src/lib/invoicing/effective-config.ts` for how the
  * two layers combine.
  *
@@ -164,7 +165,7 @@ const InfaktSettingsPage = () => {
         method: "POST",
       });
       setSettings(result);
-      toast.success("API key override cleared - falling back to the medusa-config.ts value.");
+      toast.success("Saved API key removed. The plugin falls back to the key it was installed with, if there is one.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not clear the API key override.");
     } finally {
@@ -273,7 +274,8 @@ const InfaktSettingsPage = () => {
           <Heading level="h2">Configuration</Heading>
           <Text className="text-ui-fg-subtle" size="small">
             Changes here take effect on the next order or worker tick - no redeploy, no restart.
-            Leaving a field as it loaded keeps whatever <code>medusa-config.ts</code> configures.
+            A field left as it loaded is not resaved: it keeps following however this plugin was
+            configured at install time.
           </Text>
         </div>
 
@@ -358,8 +360,8 @@ const InfaktSettingsPage = () => {
               onChange={(event) => setApiKeyInput(event.target.value)}
               placeholder={
                 settings?.api_key_override_configured
-                  ? "Set to replace the saved override"
-                  : "Set to override the medusa-config.ts apiKey"
+                  ? "Enter a new key to replace the saved one"
+                  : "Enter a key to use instead of the installed one"
               }
               type="password"
               value={apiKeyInput}
@@ -412,7 +414,7 @@ const describeInactiveReason = (settings: InfaktSettings): string => {
       return "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.";
     }
     case "no_api_key": {
-      return "No order will be invoiced: no API key is configured, in medusa-config.ts or here.";
+      return "No order will be invoiced: no inFakt API key is configured, here or at install time.";
     }
     case "paused": {
       return "Invoicing is paused. No order will be invoiced until it is resumed.";

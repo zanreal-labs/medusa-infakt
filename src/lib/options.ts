@@ -50,9 +50,16 @@ export interface InfaktPluginOptions {
    * a typo here must not silently turn into "invoice everything".
    */
   startDate?: string;
-  /** Currency the plugin invoices in. Defaults to "PLN". Others are skipped. */
+  /**
+   * Currency the plugin invoices in. Orders in any other currency are skipped.
+   * Defaults to "PLN" - see `DEFAULT_CURRENCY` for why that default is a fact
+   * about inFakt rather than a preference.
+   */
   currency?: string;
-  /** inFakt VAT rate symbol for every line. Defaults to "23". */
+  /**
+   * inFakt VAT rate symbol applied to every line, e.g. "23", "8", "5", "0",
+   * "zw", "np". Defaults to "23" - see `DEFAULT_TAX_SYMBOL`.
+   */
   taxSymbol?: string;
   /**
    * Which event enqueues an order.
@@ -164,7 +171,32 @@ export interface InfaktPublicOptions {
   disabled: boolean;
 }
 
+/**
+ * KEPT ON PURPOSE, and not a preference of whoever wrote this plugin.
+ *
+ * inFakt is a Polish invoicing and bookkeeping service: an account is a Polish
+ * registered business, the books it keeps are Polish books, and its ledger
+ * currency is PLN. Defaulting to anything else would describe no real inFakt
+ * account. This is the (c) case in the "no silent defaults" rule the rest of
+ * this plugin follows: a fact about the integrated service, not a guess at the
+ * installer's business. Any store that invoices in another currency sets
+ * `currency` explicitly and this plugin skips the rest.
+ *
+ * Do not delete this default while chasing shipped defaults in general - it is
+ * load-bearing, and the reason is written down here so the next reader does not
+ * have to guess.
+ */
 export const DEFAULT_CURRENCY = "PLN";
+
+/**
+ * KEPT ON PURPOSE, for the same reason as `DEFAULT_CURRENCY`.
+ *
+ * "23" is not a rate this plugin picked: it is inFakt's symbol for the Polish
+ * basic VAT rate, the one that applies to most goods and services an inFakt
+ * account invoices. It is a value from the integrated service's own vocabulary
+ * (alongside "8", "5", "0", "zw", "np"), not a commercial choice. A store whose
+ * lines carry a different rate sets `taxSymbol` explicitly.
+ */
 export const DEFAULT_TAX_SYMBOL = "23";
 export const DEFAULT_TIMEOUT_MS = 60_000;
 /**
@@ -216,7 +248,7 @@ export const resolveInfaktOptions = (
   options?: Partial<InfaktPluginOptions>,
 ): ResolvedInfaktOptions => {
   if (!options) {
-    throw optionError("no plugin options were provided; configure it in medusa-config.ts.");
+    throw optionError("no plugin options were provided; configure the plugin's options.");
   }
 
   const apiKeyRaw = typeof options.apiKey === "string" ? options.apiKey.trim() : "";

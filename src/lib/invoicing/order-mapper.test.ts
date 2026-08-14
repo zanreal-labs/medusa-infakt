@@ -53,20 +53,20 @@ describe("lineItemName", () => {
     // snapshots and any catalogue that still writes variants this way must keep
     // getting the product-title prefix.
     expect(
-      lineItemName({ product_title: "Bitdefender Antivirus for Mac", quantity: 1, variant_title: "1 rok / 1" }),
-    ).toBe("Bitdefender Antivirus for Mac - 1 rok / 1");
+      lineItemName({ product_title: "Antivirus Suite for Mac", quantity: 1, variant_title: "1 rok / 1" }),
+    ).toBe("Antivirus Suite for Mac - 1 rok / 1");
   });
 
   it("does not double the product title when the variant title already carries it", () => {
     // The current catalogue shape: every live variant title is prefixed with
-    // the product title, e.g. "Bitdefender Antivirus for Mac - 1 rok / 1".
+    // the product title, e.g. "Antivirus Suite for Mac - 1 rok / 1".
     expect(
       lineItemName({
-        product_title: "Bitdefender Antivirus for Mac",
+        product_title: "Antivirus Suite for Mac",
         quantity: 1,
-        variant_title: "Bitdefender Antivirus for Mac - 1 rok / 1",
+        variant_title: "Antivirus Suite for Mac - 1 rok / 1",
       }),
-    ).toBe("Bitdefender Antivirus for Mac - 1 rok / 1");
+    ).toBe("Antivirus Suite for Mac - 1 rok / 1");
   });
 
   it("does not treat a variant title as prefixed when it only shares a word boundary-less prefix", () => {

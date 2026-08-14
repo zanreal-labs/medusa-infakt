@@ -33,6 +33,18 @@ describe("resolveInfaktOptions: defaults", () => {
     expect(resolved.nipExtractor).toBeTypeOf("function");
   });
 
+  it("keeps PLN and the \"23\" tax symbol, which describe inFakt itself and not a preference", () => {
+    // Deliberately locked down. inFakt is a Polish invoicing service: an
+    // account is a Polish registered business, its books are Polish books and
+    // its ledger currency is PLN, and "23" is inFakt's own symbol for the
+    // Polish basic VAT rate. These are facts about the integrated service, so
+    // they stay - unlike a margin or a channel name, which are preferences and
+    // must not ship as defaults. A store on another currency or rate sets these
+    // options explicitly.
+    expect(DEFAULT_CURRENCY).toBe("PLN");
+    expect(DEFAULT_TAX_SYMBOL).toBe("23");
+  });
+
   it("uppercases the currency and trims the api key", () => {
     const resolved = resolveInfaktOptions(valid({ apiKey: "  key  ", currency: "pln" }));
     expect(resolved.apiKey).toBe("key");

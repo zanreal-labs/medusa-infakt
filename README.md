@@ -150,6 +150,20 @@ module the plugin registers (there is one: `infakt`).
 | `timeoutMs`             | `number`                               | `60000`              | Per-request timeout for inFakt calls.                                                                                                          |
 | `settingsEncryptionKey` | `string`                               | -                    | Encrypts an admin-set `apiKey` override at rest. Required before one can be saved from Settings -> inFakt; see below. Read it from an env var. |
 
+### Why `currency` and `taxSymbol` have defaults at all
+
+Both describe inFakt, not a preference of whoever wrote this plugin. inFakt is a Polish invoicing
+and bookkeeping service: an account belongs to a Polish registered business, the books it keeps are
+Polish books, and its ledger currency is PLN, so defaulting to anything else would describe no real
+inFakt account. `"23"` is likewise inFakt's own symbol for the Polish basic VAT rate, from the same
+vocabulary as `"8"`, `"5"`, `"0"`, `"zw"` and `"np"` - a value from the integrated service, not a
+commercial choice.
+
+They are kept deliberately, and the reasoning is repeated next to the constants in
+`src/lib/options.ts` and locked by a test, so that a later sweep for shipped defaults does not
+delete them by mistake. A store that invoices in another currency or at another rate sets these two
+options explicitly, and everything else keeps working.
+
 `apiKey`, `environment`, `currency`, `triggerEvent` and `ksef.mode` can all be overridden
 live from **Settings -> inFakt** without a redeploy - see
 [Live overrides](#live-overrides-currency-ksefmode-triggerevent-environment-apikey) below.
