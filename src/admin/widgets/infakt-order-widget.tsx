@@ -330,15 +330,15 @@ const describeInactive = (reason: InfaktSettings["reason"]): string => {
  * The exact signature a row backfilled straight into the ledger carries, never
  * produced by the normal `adopt` flow: `planAdopt` always writes `invoice_uuid`
  * in the same patch as `adopted_at` (see `src/lib/invoicing/operator-actions.ts`),
- * so the two coming apart means a row that reached the ledger some other way -
- * the 24 historical invoices imported from intra, in production.
+ * so the two coming apart means a row that reached the ledger some other way:
+ * a historical invoice bulk-imported by a migration script rather than issued
+ * by this plugin.
  *
- * That import wrote an audit note straight into whichever text column the
- * script reached for, worded for a database read, not an operator glancing at
- * an order: "backfilled from intra (invoice_source=infakt); historical
- * document, not issued by this plugin". This flag is what the display-only fix
- * hangs off - it does not care WHICH column carries that text, only that a row
- * with this exact shape should not surface its free-text detail line at all.
+ * Such a script typically writes an audit note straight into whichever text
+ * column it reached for, worded for a database read rather than for an operator
+ * glancing at an order. This flag is what the display-only fix hangs off - it
+ * does not care WHICH column carries that text, only that a row with this exact
+ * shape should not surface its free-text detail line at all.
  * Whatever wrote it stays in the database as the audit trail; only the admin
  * widget stops rendering it.
  */

@@ -306,7 +306,7 @@ export default class InfaktModuleService extends MedusaService({
     if (!this.options.settingsEncryptionKey) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        "medusa-infakt: cannot persist an `apiKey` override - the plugin option `settingsEncryptionKey` is not configured. Set it in medusa-config.ts, or configure `apiKey` there directly instead.",
+        "medusa-infakt: cannot save an API key here - a key saved from the admin is stored encrypted, and the plugin option `settingsEncryptionKey` that encrypts it is not configured. Set that option where this plugin is configured, or set the `apiKey` option there directly instead of saving one here.",
       );
     }
     return encryptSecret(trimmed, this.options.settingsEncryptionKey);

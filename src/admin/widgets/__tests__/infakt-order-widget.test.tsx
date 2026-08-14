@@ -164,7 +164,7 @@ describe("order invoicing widget", () => {
 
   it("hides the backfill audit note for the 24 historical rows' exact shape, wherever it was written", async () => {
     const backfillNote =
-      "backfilled from intra (invoice_source=infakt); historical document, not issued by this plugin";
+      "backfilled by migration script (invoice_source=infakt); historical document, not issued by this plugin";
     wire(
       [
         {
@@ -186,7 +186,7 @@ describe("order invoicing widget", () => {
     render(<InfaktOrderWidget data={{ id: "order_1" }} />);
     expect(await screen.findByText("FV/2024/1")).toBeTruthy();
     expect(screen.queryByText(new RegExp(backfillNote, "u"))).toBeNull();
-    expect(screen.queryByText(/backfilled from intra/u)).toBeNull();
+    expect(screen.queryByText(/backfilled by migration script/u)).toBeNull();
   });
 
   it("still shows a live error or skip reason for a row that is not the historical-import shape", async () => {

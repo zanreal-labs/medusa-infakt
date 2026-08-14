@@ -82,8 +82,8 @@ const minorToMajor = (minor: number | null): number | null => (minor === null ? 
  * than a database row.
  *
  * Some catalogues bake the product title into the variant title itself
- * ("Bitdefender Antivirus for Mac - 1 rok / 1" for a "Bitdefender Antivirus for
- * Mac" product); qualifying that with the full variant title would print the
+ * ("Antivirus Suite for Mac - 1 rok / 1" for an "Antivirus Suite for Mac"
+ * product); qualifying that with the full variant title would print the
  * product name twice. When the variant title starts with the product title at a
  * word boundary, only the remainder after the shared prefix is appended.
  */
