@@ -415,17 +415,68 @@ failing one.
 | **Issue date**        | `invoice_date` within `tolerance_days` (default **7**, max 31) of the order's Warsaw calendar day. An undated invoice is dropped. | Keeps a repeat customer's later order from matching the earlier invoice for the same basket. Warsaw, because that is the day the invoice itself is dated. |
 | **Buyer identity**    | B2B: exact normalized NIP. B2C: exact email OR exact normalized full name.           | The one signal that says these are the same person. Diacritics and NIP prefixes are normalized away first.                |
 | **Gross total**       | Integer equality in grosze, no tolerance. Currency must agree when both state one. An order whose total cannot be read matches nothing and says so. | An amount that is close is an amount that is wrong. A one-grosz drift means it is a different document, and an unreadable total is never treated as 0. |
-| **Uniqueness**        | Exactly one invoice may survive all three.                                            | Two survivors is the duplicate-invoice case, which is precisely what a human has to look at.                               |
+| **Uniqueness**        | Exactly one invoice may survive all three, unless the chronological pairing below settles it. | Two survivors is the duplicate-invoice case, which is precisely what a human has to look at.                               |
 | **Not already taken** | The invoice must not already be recorded on another ledger row, by uuid or by number. | One document settles one order. The number check matters because an imported row may carry only the number.               |
 | **The order's own claim** | When `order.metadata.invoice_number` names an invoice, the match must BE that one. | An order that names an invoice and matches a different one by amount and buyer is a warning, not a discovery.            |
 
-Line positions are checked but are **not** a gate: an invoice issued by another
-system names its lines its own way. They are the difference between a `high` and a
-`medium` confidence match, which the report shows for every proposal.
+**What an invoice calls its lines is never compared.** Not as a gate, not as a
+confidence grade, not as a tiebreak. The two systems name a line their own way for
+perfectly legitimate documents - a catalogue title here, a shortened trade name or a
+single aggregate line there - so a name check can only ever report a correct match as
+weaker than it is, and an operator then learns to ignore the grade. The signals are
+the person, the date and the amount.
 
-A multi-candidate case is **reported, never guessed**. `matching.ts` has a
+### Same-day duplicate orders, paired by chronology
+
+One buyer, several orders on one day, all for the same amount, invoiced with several
+documents that are equally identical: nothing but the order of events separates them,
+and refusing every one of them helps nobody. So the orders are sorted by the moment
+they were placed, the invoices by their number within their shared issue date, and the
+two lists are paired one to one.
+
+That is the ONLY place chronology decides anything here, and it is fenced in hard. It
+engages only when the two sides are genuinely twins - same buyer, same Warsaw day, same
+gross total, the very same set of candidate invoices, and those invoices agreeing on
+issue date, amount and currency - and only when the counts on both sides are equal.
+Everything else refuses the whole group and says so per order:
+
+- **Counts differ** (three orders, two identical invoices): any two of the three could
+  be the invoiced ones, so nothing is determined and nothing is paired.
+- **A lone order facing several candidates**: there is no duplicate to pair against,
+  so the other document belongs to something outside this scan.
+- **The invoices are not twins** (different issue dates): something other than
+  chronology separates them, and guessing by nearest date is what this refuses to do.
+- **The numbers are not one readable sequence**: the sequence is derived, not assumed -
+  every number must share one format and vary in exactly one digit position, which is
+  then the counter. Two formats, two varying positions or a repeated counter refuse.
+- **Two orders share a placement instant**, or one has none: they cannot be ordered.
+- **An order outside the group also matches one of these invoices**: pairing could
+  hand over a document that belongs elsewhere.
+
+Any other multi-candidate case is **reported, never guessed**. `matching.ts` has a
 nearest-date tiebreak for the crash-window flow, where a human is already looking at
 one order and knows an invoice exists; it is deliberately not used here.
+
+### The confidence grade
+
+Every proposal is graded `high` or `medium`, and the grade is about what a human should
+look at rather than whether the match is allowed - every gate above passed either way.
+
+`high` when the buyer was identified by a **key** (a NIP or an email address) and the
+invoice was issued **on the order's day or the day next to it**, or when the order
+**names that invoice number itself**, which is the order's own claim rather than an
+inference.
+
+`medium` when the buyer was matched on a **full name** alone (two people can share
+one), when the issue date sat **more than a day** from the order (still inside the
+window the operator asked for, but no longer the obvious document), or when the
+**chronological pairing** settled it, which is correct only if duplicate orders were
+invoiced in the order they were placed.
+
+How many invoices happened to be in the date window is recorded as evidence but does
+**not** grade: candidates that lost on identity or amount lost on a hard gate, and
+letting their number darken a survivor would mark every match in a busy week as weaker
+than the same match in a quiet one.
 
 ### What it will not do
 
@@ -445,9 +496,10 @@ one order and knows an invoice exists; it is deliberately not used here.
 
 An adopted row carries `adopted_at`, the invoice's uuid and number, `completed_at`
 set to the day the document was issued, and `adopted_evidence`: the signal that
-identified the buyer, the gross total, how far the issue date sat from the order,
-and whether the line positions confirmed it. Signal KINDS and numbers only - never
-an email or a name, because this table holds no buyer data.
+identified the buyer, the gross total, how far the issue date sat from the order, and
+whether chronology had to tell same-day duplicates apart (`tie_breaker`, with the
+order's place among them). Signal KINDS and numbers only - never an email or a name,
+because this table holds no buyer data.
 
 `ksef_required` is recorded too, decided from the tax code on the adopted document
 exactly as `decideKsef` would have decided it. On a terminal adopted row it is an
@@ -460,10 +512,11 @@ says "not tracked by this plugin" rather than claiming a filing is queued.
   100 at a time. The date range is the only server-side narrowing that helps:
   **inFakt has no filter for the gross total, and none for the buyer's email or
   name**, so those are applied here, after the page is read.
-- `GET /invoices/{uuid}.json`, at most once per proposed adoption, and only to read
-  line positions the list response did not carry.
+That list response carries every field the rules read - buyer, amount, currency, issue
+date and number - so the reconciliation makes **no per-invoice detail call at all**. It
+used to fetch `GET /invoices/{uuid}.json` for line positions; nothing reads those now.
 
-Both are reads. The reconciliation calls nothing that creates, sends or files.
+It is a read. The reconciliation calls nothing that creates, sends or files.
 
 ## Where the buyer's NIP comes from
 

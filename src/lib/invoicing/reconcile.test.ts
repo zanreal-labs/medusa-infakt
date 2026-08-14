@@ -3,12 +3,13 @@ import { describe, expect, it } from "vitest";
 import { defaultNipExtractor } from "./nip";
 import type { MatchInvoiceCandidate } from "./matching";
 import {
-  applyPositionConfirmation,
   dateOffsetDays,
   DEFAULT_DATE_TOLERANCE_DAYS,
   filterByDateWindow,
+  gradeConfidence,
   invoiceIsCompany,
   MAX_DATE_TOLERANCE_DAYS,
+  orderInvoicesBySequence,
   planAdoptions,
   rejectAlreadyLinked,
   rejectContestedInvoices,
@@ -34,7 +35,7 @@ const order = (overrides: Partial<ReconcileOrder> = {}): ReconcileOrder => ({
   fullName: "Jan Kowalski",
   grossTotal: 14_900,
   isCompany: false,
-  items: [{ name: "Dysk SSD 1TB", quantity: 1 }],
+  orderDate: "2026-08-10T11:05:00.000Z",
   orderDay: ORDER_DAY,
   orderId: "order_112",
   ...overrides,
@@ -48,7 +49,6 @@ const invoice = (overrides: Partial<MatchInvoiceCandidate> = {}): MatchInvoiceCa
   grossPrice: 14_900,
   invoiceDate: ORDER_DAY,
   number: "ZR-009009",
-  services: [{ name: "Dysk SSD 1TB", quantity: 1 }],
   uuid: "uuid-1",
   ...overrides,
 });
@@ -127,20 +127,21 @@ describe("an unambiguous match", () => {
       invoice_date: ORDER_DAY,
       invoice_number: "ZR-009009",
       invoice_uuid: "uuid-1",
-      positions_confirmed: true,
       source: "infakt-reconcile",
+      tie_breaker: "none",
     });
     // The whole point of "signals, not values": no buyer data reaches the ledger.
     expect(JSON.stringify(entry.evidence)).not.toContain("allegromail");
     expect(JSON.stringify(entry.evidence)).not.toContain("Kowalski");
   });
 
-  it("is a medium-confidence match when the invoice names its lines differently", () => {
-    const [entry] = plan([order()], [invoice({ services: [{ name: "Towar", quantity: 1 }] })]);
-    expect(entry.decision).toBe("adopt");
-    expect(entry.confidence).toBe("medium");
-    expect(entry.evidence?.positions_confirmed).toBe(false);
-    expect(entry.reasons.at(-1)).toContain("did NOT confirm");
+  it("says nothing about what the invoice calls its lines, at any strength", () => {
+    // The signal the owner ruled out. An invoice issued with "Towar" where the
+    // order says "Dysk SSD 1TB" is the same document, and there is now nothing on
+    // a candidate for a name check to read.
+    const [entry] = plan([order()], [invoice()]);
+    expect(entry.reasons.join(" ")).not.toMatch(/position|item name|line/iu);
+    expect(JSON.stringify(entry.evidence)).not.toContain("positions");
   });
 
   it("matches a consumer on the name when the invoice carries no email", () => {
@@ -266,7 +267,7 @@ describe("what it refuses", () => {
     expect(entries[0].invoice).toBeUndefined();
     expect(entries[0].evidence).toBeUndefined();
     expect(entries[0].candidates.map((candidate) => candidate.uuid)).toEqual(["uuid-1", "uuid-2"]);
-    expect(entries[0].reasons.at(-1)).toContain("refusing to guess");
+    expect(entries[0].reasons.join(" ")).toContain("refusing to guess");
   });
 
   it("does NOT break an ambiguity by nearest date, even when one is nearer", () => {
@@ -318,8 +319,13 @@ describe("what it refuses", () => {
 
 describe("one invoice, one order", () => {
   it("refuses both orders when the same invoice matches two of them", () => {
+    // Two orders on DIFFERENT days, so the chronological pairing does not apply and
+    // each adopts the same document on its own. One invoice cannot settle both.
     const entries = rejectContestedInvoices(
-      plan([order(), order({ orderId: "order_113", displayId: 113 })], [invoice()]),
+      plan(
+        [order(), order({ displayId: 113, orderDay: "2026-08-09", orderId: "order_113" })],
+        [invoice()],
+      ),
     );
     expect(entries.map((entry) => entry.decision)).toEqual(["ambiguous", "ambiguous"]);
     expect(entries[0].reasons.at(-1)).toContain("only settle one order");
@@ -347,29 +353,299 @@ describe("one invoice, one order", () => {
   });
 });
 
-describe("applyPositionConfirmation", () => {
-  const medium = () => plan([order()], [invoice({ services: [] })])[0];
-
-  it("upgrades a list-only match once the detail response confirms the lines", () => {
-    expect(medium().confidence).toBe("medium");
-    const upgraded = applyPositionConfirmation(medium(), order(), [
-      { name: "Dysk SSD 1TB", quantity: 1 },
-    ]);
-    expect(upgraded.confidence).toBe("high");
-    expect(upgraded.evidence?.positions_confirmed).toBe(true);
-    expect(upgraded.reasons.at(-1)).toContain("cover every order item");
+describe("the confidence grade, with names gone", () => {
+  it("is high for an email or NIP match issued on or next to the order day", () => {
+    expect(
+      gradeConfidence({
+        dateOffsetDays: 0,
+        declaredByOrder: false,
+        identity: "email",
+        tieBreaker: "none",
+      }).confidence,
+    ).toBe("high");
+    expect(
+      gradeConfidence({
+        dateOffsetDays: 1,
+        declaredByOrder: false,
+        identity: "nip",
+        tieBreaker: "none",
+      }).confidence,
+    ).toBe("high");
   });
 
-  it("leaves the entry as it was when the lines still do not confirm", () => {
-    const unchanged = applyPositionConfirmation(medium(), order(), [
-      { name: "Something else", quantity: 4 },
-    ]);
-    expect(unchanged.confidence).toBe("medium");
+  it("is medium when only a full name says who the buyer is", () => {
+    // "Jan Kowalski" is thousands of people. A same-day, same-amount coincidence
+    // between two of them is exactly the near-miss a human catches.
+    const grade = gradeConfidence({
+      dateOffsetDays: 0,
+      declaredByOrder: false,
+      identity: "name",
+      tieBreaker: "none",
+    });
+    expect(grade.confidence).toBe("medium");
+    expect(grade.reason).toContain("full name");
   });
 
-  it("never touches a refusal", () => {
-    const ambiguous = plan([order()], [invoice({ uuid: "a" }), invoice({ uuid: "b" })])[0];
-    expect(applyPositionConfirmation(ambiguous, order(), [])).toBe(ambiguous);
+  it("is medium when the invoice was issued more than a day from the order", () => {
+    expect(
+      gradeConfidence({
+        dateOffsetDays: -3,
+        declaredByOrder: false,
+        identity: "email",
+        tieBreaker: "none",
+      }).confidence,
+    ).toBe("medium");
+  });
+
+  it("is medium whenever chronology settled it, however strong the rest is", () => {
+    expect(
+      gradeConfidence({
+        dateOffsetDays: 0,
+        declaredByOrder: false,
+        identity: "nip",
+        tieBreaker: "chronological",
+      }).confidence,
+    ).toBe("medium");
+  });
+
+  it("is high when the order names the invoice itself, whatever else is weak", () => {
+    expect(
+      gradeConfidence({
+        dateOffsetDays: 6,
+        declaredByOrder: true,
+        identity: "name",
+        tieBreaker: "none",
+      }).confidence,
+    ).toBe("high");
+  });
+
+  it("does not grade on how busy the date window was", () => {
+    // Candidates that lost on identity or amount lost on a hard gate. Letting their
+    // number darken the survivor would mark a busy week weaker than a quiet one.
+    const noise = [
+      invoice({ clientEmail: "other@example.com", clientFirstName: "Anna", clientLastName: "Nowak", uuid: "noise-1" }),
+      invoice({ grossPrice: 9_900, uuid: "noise-2" }),
+    ];
+    const [entry] = plan([order()], [invoice(), ...noise]);
+    expect(entry.decision).toBe("adopt");
+    expect(entry.confidence).toBe("high");
+    expect(entry.evidence?.candidates_in_window).toBe(3);
+  });
+
+  it("grades a name match, same day, one buyer match in the window", () => {
+    // A name-only match landing on the invoice's own day: matched on the full name,
+    // date offset 0, two invoices in the window of which one was this buyer's.
+    const [entry] = plan(
+      [order({ email: undefined })],
+      [invoice({ clientEmail: undefined, number: "3/08/2031" }), invoice({ grossPrice: 1, uuid: "other" })],
+    );
+    expect(entry.decision).toBe("adopt");
+    expect(entry.evidence?.identity).toBe("name");
+    expect(entry.evidence?.date_offset_days).toBe(0);
+    expect(entry.confidence).toBe("medium");
+  });
+});
+
+describe("orderInvoicesBySequence", () => {
+  const numbered = (...numbers: string[]) =>
+    numbers.map((number, index) => invoice({ number, uuid: `uuid-${index}` }));
+
+  const ordered = (...numbers: string[]) =>
+    orderInvoicesBySequence(numbered(...numbers))?.map((candidate) => candidate.number);
+
+  it("sorts inFakt's default numbering by its counter, numerically", () => {
+    // String order would put "10/08/2031" before "3/08/2031".
+    expect(ordered("10/08/2031", "3/08/2031")).toEqual(["3/08/2031", "10/08/2031"]);
+  });
+
+  it("finds the counter wherever it sits in the format", () => {
+    expect(ordered("FV/2026/08/4", "FV/2026/08/3")).toEqual(["FV/2026/08/3", "FV/2026/08/4"]);
+    expect(ordered("ZR-009010", "ZR-009009")).toEqual(["ZR-009009", "ZR-009010"]);
+  });
+
+  it("refuses two different numbering formats", () => {
+    expect(orderInvoicesBySequence(numbered("ZR-009009", "3/08/2031"))).toBeNull();
+  });
+
+  it("refuses when more than one position varies, because none of them is THE counter", () => {
+    expect(orderInvoicesBySequence(numbered("3/08/2031", "4/09/2031"))).toBeNull();
+  });
+
+  it("refuses a repeated counter, and a number with no digits at all", () => {
+    expect(orderInvoicesBySequence(numbered("3/08/2031", "3/08/2031"))).toBeNull();
+    expect(orderInvoicesBySequence(numbered("draft", "final"))).toBeNull();
+  });
+
+  it("refuses when a candidate has no number to read", () => {
+    expect(
+      orderInvoicesBySequence([invoice({ number: undefined }), invoice({ number: "4/08/2031", uuid: "u-2" })]),
+    ).toBeNull();
+  });
+});
+
+describe("duplicate orders in one day, paired by chronology", () => {
+  /**
+   * The owner's rule, verbatim: "kwota i kolejnosc zamowien (timestamp) jesli sa
+   * powielone zamowienia w ciagu dnia". Money is built from a real Medusa
+   * BigNumber, as the query layer returns it, never a hand-written literal.
+   */
+  const duplicates = (times: (string | null)[], amount = "149.00") =>
+    times.map((created_at, index) =>
+      toReconcileOrder(
+        {
+          billing_address: { first_name: "Jan", last_name: "Kowalski" },
+          created_at,
+          currency_code: "pln",
+          display_id: 100 + index,
+          email: "buyer-synthetic@allegromail.pl",
+          id: `order_dup_${index + 1}`,
+          total: new BigNumber(amount),
+        } as MedusaOrderLike,
+        defaultNipExtractor,
+        "PLN",
+      ),
+    );
+
+  const twins = (...numbers: string[]) =>
+    numbers.map((number, index) =>
+      invoice({ invoiceDate: ORDER_DAY, number, uuid: `twin-${index + 1}` }),
+    );
+
+  it("pairs the earlier order with the earlier invoice, and the later with the later", () => {
+    const entries = plan(
+      duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]),
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(entries.map((entry) => entry.decision)).toEqual(["adopt", "adopt"]);
+    expect(entries[0].invoice?.number).toBe("3/08/2031");
+    expect(entries[1].invoice?.number).toBe("4/08/2031");
+  });
+
+  it("pairs on placement time, not on the order the caller happened to list them in", () => {
+    const [later, earlier] = duplicates(["2026-08-10T14:30:00Z", "2026-08-10T09:12:00Z"]);
+    const entries = plan([later, earlier], twins("3/08/2031", "4/08/2031"));
+    expect(entries[0].invoice?.number).toBe("4/08/2031");
+    expect(entries[1].invoice?.number).toBe("3/08/2031");
+  });
+
+  it("records the tie-break in the evidence and grades it medium", () => {
+    const [first, second] = plan(
+      duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]),
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(first.confidence).toBe("medium");
+    expect(first.evidence).toMatchObject({
+      duplicate_count: 2,
+      duplicate_index: 1,
+      gross_total_minor: 14_900,
+      tie_breaker: "chronological",
+    });
+    expect(second.evidence).toMatchObject({ duplicate_index: 2, tie_breaker: "chronological" });
+    expect(first.reasons.join(" ")).toContain("Paired by chronology");
+  });
+
+  it("REFUSES all three when three duplicate orders face two identical invoices", () => {
+    // Any two of the three could be the invoiced ones, so nothing is determined -
+    // not even the first pair.
+    const entries = plan(
+      duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z", "2026-08-10T19:05:00Z"]),
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(entries.map((entry) => entry.decision)).toEqual([
+      "ambiguous",
+      "ambiguous",
+      "ambiguous",
+    ]);
+    for (const entry of entries) {
+      expect(entry.reasons.at(-1)).toContain("The counts differ");
+    }
+  });
+
+  it("REFUSES two duplicate orders that face a single invoice", () => {
+    const entries = plan(duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]), twins("3/08/2031"));
+    expect(entries.map((entry) => entry.decision)).toEqual(["ambiguous", "ambiguous"]);
+    expect(entries[0].reasons.at(-1)).toContain("The counts differ");
+  });
+
+  it("REFUSES a lone order facing two identical invoices, and says why", () => {
+    const entries = plan(duplicates(["2026-08-10T09:12:00Z"]), twins("3/08/2031", "4/08/2031"));
+    expect(entries[0].decision).toBe("ambiguous");
+    expect(entries[0].reasons.at(-1)).toContain("Only one order from this buyer");
+  });
+
+  it("REFUSES when the invoices do not share one issue date", () => {
+    // Different dates mean something other than chronology separates them, and
+    // picking the nearest is exactly the guess this module does not make.
+    const entries = plan(duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]), [
+      invoice({ invoiceDate: ORDER_DAY, number: "3/08/2031", uuid: "twin-1" }),
+      invoice({ invoiceDate: "2026-08-11", number: "4/08/2031", uuid: "twin-2" }),
+    ]);
+    expect(entries.map((entry) => entry.decision)).toEqual(["ambiguous", "ambiguous"]);
+    expect(entries[0].reasons.at(-1)).toContain("do NOT share one issue date");
+  });
+
+  it("REFUSES when the invoice numbers are not one readable sequence", () => {
+    const entries = plan(
+      duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]),
+      twins("ZR-009009", "3/08/2031"),
+    );
+    expect(entries.map((entry) => entry.decision)).toEqual(["ambiguous", "ambiguous"]);
+    expect(entries[0].reasons.at(-1)).toContain("do not form one readable sequence");
+  });
+
+  it("REFUSES two duplicate orders placed at the very same instant", () => {
+    const entries = plan(
+      duplicates(["2026-08-10T09:12:00Z", "2026-08-10T09:12:00Z"]),
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(entries.map((entry) => entry.decision)).toEqual(["ambiguous", "ambiguous"]);
+    expect(entries[0].reasons.at(-1)).toContain("cannot be put in order");
+  });
+
+  it("REFUSES when one of the duplicates carries no placement instant", () => {
+    const [first, second] = duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]);
+    const entries = plan(
+      [first, { ...second, orderDate: undefined }],
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(entries.map((entry) => entry.decision)).toEqual(["ambiguous", "ambiguous"]);
+    expect(entries[0].reasons.at(-1)).toContain("cannot be put in order");
+  });
+
+  it("REFUSES when an order outside the group also matches one of the invoices", () => {
+    // The day before, same buyer, same amount, inside the tolerance: pairing could
+    // hand over a document that belongs to that order instead.
+    const outsider = order({ orderDay: "2026-08-09", orderId: "order_outside" });
+    const entries = plan(
+      [...duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]), outsider],
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(entries[0].decision).toBe("ambiguous");
+    expect(entries[0].reasons.at(-1)).toContain("also matched by an order outside this group");
+  });
+
+  it("does not engage at all when the amounts tell the orders apart", () => {
+    const [first] = duplicates(["2026-08-10T09:12:00Z"]);
+    const [second] = duplicates(["2026-08-10T14:30:00Z"], "99.00");
+    const entries = plan([first, { ...second, orderId: "order_dup_2" }], [
+      invoice({ invoiceDate: ORDER_DAY, number: "3/08/2031", uuid: "twin-1" }),
+      invoice({ grossPrice: 9_900, invoiceDate: ORDER_DAY, number: "4/08/2031", uuid: "twin-2" }),
+    ]);
+    expect(entries.map((entry) => entry.decision)).toEqual(["adopt", "adopt"]);
+    expect(entries.map((entry) => entry.evidence?.tie_breaker)).toEqual(["none", "none"]);
+    expect(entries[0].confidence).toBe("high");
+  });
+
+  it("leaves an order that names its own invoice out of the pairing", () => {
+    const [first, second] = duplicates(["2026-08-10T09:12:00Z", "2026-08-10T14:30:00Z"]);
+    const entries = plan(
+      [{ ...first, declaredInvoiceNumber: "4/08/2031" }, second],
+      twins("3/08/2031", "4/08/2031"),
+    );
+    expect(entries[0].decision).toBe("adopt");
+    expect(entries[0].invoice?.number).toBe("4/08/2031");
+    expect(entries[0].evidence?.tie_breaker).toBe("none");
+    expect(entries[1].decision).toBe("ambiguous");
   });
 });
 
@@ -409,7 +685,7 @@ describe("toReconcileOrder", () => {
       fullName: "Jan Kowalski",
       grossTotal: 14_900,
       isCompany: false,
-      items: [{ name: "Dysk SSD 1TB", quantity: 1 }],
+      orderDate: "2026-08-10T11:05:00.000Z",
       orderDay: "2026-08-10",
       orderId: "order_112",
     });
@@ -432,6 +708,21 @@ describe("toReconcileOrder", () => {
       "PLN",
     );
     expect(mapped).toMatchObject({ isCompany: true, taxId: "5261040828" });
+  });
+
+  it("carries no line item names into the rules at all", () => {
+    const mapped = toReconcileOrder(medusaOrder(), defaultNipExtractor, "PLN");
+    expect(JSON.stringify(mapped)).not.toContain("Dysk SSD");
+  });
+
+  it("leaves the placement instant unset when the order has no readable one", () => {
+    // Never defaulted to "now": that would sort an undated order into a
+    // chronological pairing it has no business being part of.
+    for (const created_at of [null, "not a timestamp"]) {
+      expect(
+        toReconcileOrder(medusaOrder({ created_at }), defaultNipExtractor, "PLN").orderDate,
+      ).toBeUndefined();
+    }
   });
 });
 

@@ -5,10 +5,8 @@ import {
   filterByIdentity,
   filterByTotal,
   normalizeEmail,
-  normalizeItemName,
   normalizeName,
   normalizeTaxId,
-  positionsOverlap,
   totalsMatch,
 } from "./matching";
 import type { MatchInvoiceCandidate, MatchOrderInput } from "./matching";
@@ -19,10 +17,6 @@ const consumerOrder = (overrides: Partial<MatchOrderInput> = {}): MatchOrderInpu
   fullName: "Jan Kowalski",
   grossTotal: 13_344,
   isCompany: false,
-  items: [
-    { name: "Program antywirusowy", quantity: 1 },
-    { name: "Pendrive 64GB", quantity: 2 },
-  ],
   orderId: "order_1",
   ...overrides,
 });
@@ -43,10 +37,6 @@ const candidate = (overrides: Partial<MatchInvoiceCandidate> = {}): MatchInvoice
   currency: "PLN",
   grossPrice: 13_344,
   number: "1/07/2026",
-  services: [
-    { name: "Program antywirusowy", quantity: 1 },
-    { name: "Pendrive 64GB", quantity: 2 },
-  ],
   uuid: "u-1",
   ...overrides,
 });
@@ -67,10 +57,6 @@ describe("normalization", () => {
     expect(normalizeName("  Jan   Kowalski  ")).toBe("jan kowalski");
   });
 
-  it("strips punctuation from an item name but keeps letters and digits", () => {
-    expect(normalizeItemName("Pendrive 64GB (USB-C)")).toBe("pendrive 64gb usb c");
-    expect(normalizeItemName("!!!")).toBe("");
-  });
 });
 
 describe("stage 1: identity", () => {
@@ -177,85 +163,12 @@ describe("stage 2: gross total", () => {
   });
 });
 
-describe("stage 3: line positions", () => {
-  it("confirms a candidate whose positions cover every order item", () => {
-    expect(positionsOverlap(consumerOrder(), candidate())).toBe(true);
-  });
-
-  it("is order-independent", () => {
-    expect(
-      positionsOverlap(
-        consumerOrder(),
-        candidate({
-          services: [
-            { name: "Pendrive 64GB", quantity: 2 },
-            { name: "Program antywirusowy", quantity: 1 },
-          ],
-        }),
-      ),
-    ).toBe(true);
-  });
-
-  it("accepts a position name that contains the order item name", () => {
-    expect(
-      positionsOverlap(consumerOrder({ items: [{ name: "Pendrive", quantity: 2 }] }), candidate()),
-    ).toBe(true);
-  });
-
-  it("rejects a quantity mismatch", () => {
-    expect(
-      positionsOverlap(
-        consumerOrder(),
-        candidate({
-          services: [
-            { name: "Program antywirusowy", quantity: 1 },
-            { name: "Pendrive 64GB", quantity: 3 },
-          ],
-        }),
-      ),
-    ).toBe(false);
-  });
-
-  it("requires EVERY order item to be covered, not most of them", () => {
-    expect(
-      positionsOverlap(
-        consumerOrder(),
-        candidate({ services: [{ name: "Program antywirusowy", quantity: 1 }] }),
-      ),
-    ).toBe(false);
-  });
-
-  it("consumes each position at most once", () => {
-    // Two identical order lines need two positions, not one matched twice.
-    expect(
-      positionsOverlap(
-        consumerOrder({
-          items: [
-            { name: "Pendrive", quantity: 1 },
-            { name: "Pendrive", quantity: 1 },
-          ],
-        }),
-        candidate({ services: [{ name: "Pendrive", quantity: 1 }] }),
-      ),
-    ).toBe(false);
-  });
-
-  it("reports no overlap for an un-fetched candidate with no positions", () => {
-    // This is what stops a list-only candidate from passing stage 3 by omission.
-    expect(positionsOverlap(consumerOrder(), candidate({ services: [] }))).toBe(false);
-  });
-
-  it("reports no overlap for an order with no items", () => {
-    expect(positionsOverlap(consumerOrder({ items: [] }), candidate())).toBe(false);
-  });
-});
-
 describe("classifyOrder", () => {
   it("matches a unique survivor", () => {
     const result = classifyOrder(consumerOrder(), [candidate()]);
     expect(result.classification).toBe("matched");
     expect(result.invoice?.uuid).toBe("u-1");
-    expect(result.confirmedCount).toBe(1);
+    expect(result.survivorCount).toBe(1);
     expect(result.identityCount).toBe(1);
   });
 
@@ -278,16 +191,25 @@ describe("classifyOrder", () => {
     ]);
     expect(result.classification).toBe("ambiguous");
     expect(result.invoice).toBeUndefined();
-    expect(result.confirmedCount).toBe(2);
+    expect(result.survivorCount).toBe(2);
     expect(result.reasons.at(-1)).toContain("1/07/2026");
     expect(result.reasons.at(-1)).toContain("2/07/2026");
   });
 
-  it("carries a reason line per stage", () => {
+  it("carries a reason line per stage, and says nothing about line names", () => {
     const result = classifyOrder(companyOrder(), [candidate({ clientTaxCode: "5261040828" })]);
     expect(result.reasons[0]).toContain("NIP match");
     expect(result.reasons[1]).toContain("Gross total");
-    expect(result.reasons[2]).toContain("Line positions confirmed");
+    expect(result.reasons).toHaveLength(2);
+    expect(result.reasons.join(" ")).not.toMatch(/position|line item/iu);
+  });
+
+  it("matches a document that names its lines differently, with no penalty at all", () => {
+    // The signal the owner ruled out: the two systems name a line their own way,
+    // and there is now nothing on a candidate for a name check to read.
+    const result = classifyOrder(consumerOrder(), [candidate()]);
+    expect(result.classification).toBe("matched");
+    expect(JSON.stringify(result.invoice)).not.toContain("services");
   });
 
   it("names the buyer-match stage for a consumer order", () => {

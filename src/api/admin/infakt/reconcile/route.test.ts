@@ -41,13 +41,15 @@ interface Fakes {
   ksefMode?: "nip-only" | "all" | "never";
 }
 
+const getInvoice = vi.fn().mockResolvedValue(INVOICE);
+
 const service = (fakes: Fakes = {}) => {
   const listInvoices = vi
     .fn()
     .mockResolvedValue(fakes.invoices ?? ([INVOICE] as Record<string, unknown>[]));
   return {
     getApiClient: vi.fn().mockResolvedValue({
-      getInvoice: vi.fn().mockResolvedValue(INVOICE),
+      getInvoice,
       listInvoices,
     }),
     getEffectiveOptions: vi.fn().mockResolvedValue({
@@ -82,6 +84,7 @@ const WINDOW = { from: "2026-08-01", to: "2026-08-12" };
 
 beforeEach(() => {
   run.mockReset();
+  getInvoice.mockClear();
   run.mockResolvedValue({ result: { adopted: [], skipped: [] } });
 });
 
@@ -102,6 +105,13 @@ describe("GET /admin/infakt/reconcile", () => {
     });
     expect(body.entries[0].invoice.number).toBe("ZR-009009");
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("reads the list endpoint only - nothing needs an invoice's line positions now", async () => {
+    const svc = service();
+    await GET(request(svc, { query: WINDOW }), mockResponse());
+    expect(svc.listInvoices).toHaveBeenCalled();
+    expect(getInvoice).not.toHaveBeenCalled();
   });
 
   it("asks inFakt only for the window, padded by the tolerance", async () => {

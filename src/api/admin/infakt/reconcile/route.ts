@@ -6,7 +6,6 @@ import type { MatchInvoiceCandidate } from "../../../../lib/invoicing/matching";
 import { isCalendarDate } from "../../../../lib/invoicing/money";
 import type { MedusaOrderLike } from "../../../../lib/invoicing/order-mapper";
 import {
-  applyPositionConfirmation,
   INVOICE_PAGE_SIZE,
   MAX_INVOICE_PAGES,
   planAdoptions,
@@ -33,7 +32,9 @@ import type { AdoptInvoiceInput, AdoptInvoicesResult } from "../../../../workflo
  * documents are real and filed, only this plugin's ledger does not know about
  * them. The invoices are read from the inFakt API and matched to Medusa orders on
  * ORDER DATA alone - issue date against the order's day, buyer identity, and the
- * gross total to the grosz. No other system is consulted, and none needs to exist.
+ * gross total to the grosz, plus the order of the documents in time when one buyer
+ * placed duplicate orders on one day. No other system is consulted, and none needs
+ * to exist. What the two systems CALL a line is never compared.
  *
  * ## Dry run by default
  *
@@ -88,7 +89,6 @@ const ORDER_FIELDS = [
   "created_at",
   "canceled_at",
   "metadata",
-  "items.*",
   "billing_address.*",
   "shipping_address.*",
 ];
@@ -151,6 +151,10 @@ async function readOrders(
  * Read with `q[invoice_date_gteq]` / `q[invoice_date_lteq]`, which is the only
  * server-side narrowing inFakt offers that helps here - it has no filter for the
  * gross total, and none for the buyer's email or name.
+ *
+ * The LIST response carries every field the rules read, so the reconciliation makes
+ * no per-invoice detail call at all. Line positions were the only thing it ever
+ * fetched them for, and nothing may look at those any more.
  */
 async function readInvoices(
   client: Pick<InfaktClient, "listInvoices">,
@@ -176,10 +180,6 @@ async function readInvoices(
         grossPrice: invoice.grossPrice,
         invoiceDate: invoice.invoiceDate,
         number: invoice.number,
-        services: (invoice.services ?? []).map((service) => ({
-          name: service.name,
-          quantity: service.quantity,
-        })),
         uuid: invoice.uuid,
       })),
     );
@@ -188,45 +188,6 @@ async function readInvoices(
     }
   }
   return { invoices, truncated: true };
-}
-
-/**
- * Fetch the detail response for every proposed invoice that was matched without
- * line positions, so the report can say whether they confirm it.
- *
- * At most one GET per proposed adoption, and only ever an upgrade from `medium` to
- * `high` - a failed read leaves the entry exactly as the list response classified
- * it rather than failing the whole report.
- */
-async function confirmPositions(
-  entries: AdoptionPlanEntry[],
-  orders: Map<string, ReconcileOrder>,
-  client: Pick<InfaktClient, "getInvoice">,
-): Promise<AdoptionPlanEntry[]> {
-  const confirmed: AdoptionPlanEntry[] = [];
-  for (const entry of entries) {
-    const order = orders.get(entry.orderId);
-    if (entry.decision !== "adopt" || !entry.evidence || entry.evidence.positions_confirmed || !order) {
-      confirmed.push(entry);
-      continue;
-    }
-    try {
-      const detail = await client.getInvoice(entry.evidence.invoice_uuid);
-      confirmed.push(
-        applyPositionConfirmation(
-          entry,
-          order,
-          (detail.services ?? []).map((service) => ({
-            name: service.name,
-            quantity: service.quantity,
-          })),
-        ),
-      );
-    } catch {
-      confirmed.push(entry);
-    }
-  }
-  return confirmed;
 }
 
 /** Invoices already recorded on some ledger row, by uuid and by number. */
@@ -298,9 +259,8 @@ async function buildReport(
   });
 
   const byOrderId = new Map(orders.map((order) => [order.orderId, order]));
-  let entries = planAdoptions(orders, invoices, { dateToleranceDays: params.toleranceDays });
-  entries = await confirmPositions(entries, byOrderId, client);
-  entries = rejectAlreadyLinked(entries, await readLinkedInvoices(infakt, entries));
+  const planned = planAdoptions(orders, invoices, { dateToleranceDays: params.toleranceDays });
+  const entries = rejectAlreadyLinked(planned, await readLinkedInvoices(infakt, planned));
 
   return {
     orders: byOrderId,

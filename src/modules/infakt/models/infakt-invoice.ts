@@ -32,9 +32,10 @@ const InfaktInvoice = model
     /**
      * Why the reconciliation believed this invoice belongs to this order: the
      * signal that identified the buyer, the gross total, how far the issue date
-     * sat from the order, and whether the line positions confirmed it. JSON, and
-     * PII-free by construction - signal KINDS and numbers, never an email or a
-     * name (see `AdoptionEvidence` in `src/lib/invoicing/reconcile.ts`).
+     * sat from the order, and whether same-day duplicate orders had to be told
+     * apart by the order of the documents in time. JSON, and PII-free by
+     * construction - signal KINDS and numbers, never an email or a name (see
+     * `AdoptionEvidence` in `src/lib/invoicing/reconcile.ts`).
      *
      * Null for an invoice this plugin issued itself, and for a uuid an operator
      * pasted in by hand: in both cases nobody inferred anything that an audit

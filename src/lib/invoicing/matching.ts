@@ -16,44 +16,46 @@
  *  2. Adoption of an existing store. Invoices issued before this plugin was
  *     installed, or by another system during a migration.
  *
+ * ## What is a signal, and what is not
+ *
+ * The signals are the PERSON, the DATE and the AMOUNT. Nothing else.
+ *
+ * Item names are deliberately NOT among them, at any strength: not as a gate, not
+ * as a confidence grade, not as a tiebreak. The two systems name a line for their
+ * own reasons - one writes the catalogue title, another writes a shortened trade
+ * name, an aggregate "Towar" or whatever the seller typed - and those names differ
+ * for perfectly legitimate documents. Grading on them produced exactly one visible
+ * effect in production: correct matches were reported as weaker than they were,
+ * which is noise an operator then has to learn to ignore. A signal that is wrong
+ * for legitimate data is worse than no signal, so there is none here.
+ *
  * ## Design
  *
- * Candidates are narrowed in three stages, each strictly more expensive than the
- * last, so the caller can defer fetching invoice line positions (only available
- * from inFakt's per-invoice detail endpoint) until they are actually needed:
+ * Candidates are narrowed in two stages, both readable off inFakt's LIST response,
+ * so a match needs no per-invoice detail fetch at all:
  *
  *   1. `filterByIdentity` - a B2B order (a NIP on the order) matches on
  *      normalized `clientTaxCode`. A B2C order matches on normalized email OR
- *      normalized full name. Cheap: every field is on the LIST response.
+ *      normalized full name.
  *   2. `filterByTotal` - keep only candidates whose gross total equals the
  *      order's, grosz for grosz (integer equality, no tolerance), and whose
- *      currency agrees when both sides state one. Also list-response fields.
- *   3. `positionsOverlap` - keep only candidates whose line positions cover the
- *      order's items (name similarity plus equal quantity, order-independent).
- *      This is the one check that needs the DETAIL response.
+ *      currency agrees when both sides state one.
  *
- * `classifyOrder` runs all three assuming every candidate already carries its
- * positions, which is the shape tests want. Production code filters by identity
- * and total against list-only candidates, detail-fetches only the survivors, then
- * calls `classifyFromConfirmed` - so the same classification rule runs in both
- * places with no duplicated logic.
+ * `classifyOrder` runs both and classifies. `classifyFromConfirmed` is the shared
+ * tail end, so a caller that narrowed the candidates itself runs the same
+ * MATCHED/AMBIGUOUS/NO_MATCH rule with no duplicated logic.
  *
  * ## Conservatism
  *
  * A wrong invoice-to-order pairing is worse than no pairing at all. It is
  * financial data, and a misapplied invoice number is a fact reported to customers
- * and to KSeF. So every check is a hard equality or a deliberately narrow
- * similarity rule, never a fuzzy score with a threshold dial. Multiple survivors
- * classify as AMBIGUOUS and are NEVER auto-applied; zero classify as NO_MATCH.
- * Only a unique survivor classifies as MATCHED.
+ * and to KSeF. So every check is a hard equality, never a fuzzy score with a
+ * threshold dial. Multiple survivors classify as AMBIGUOUS and are NEVER
+ * auto-applied; zero classify as NO_MATCH. Only a unique survivor classifies as
+ * MATCHED.
  */
 
 export type MatchClassification = "matched" | "ambiguous" | "no_match";
-
-export interface MatchOrderItem {
-  name: string;
-  quantity: number;
-}
 
 export interface MatchOrderInput {
   orderId: string;
@@ -76,12 +78,12 @@ export interface MatchOrderInput {
    */
   grossTotal: number | null;
   currency?: string;
-  items: MatchOrderItem[];
   /**
-   * When the order was placed (ISO timestamp/date). Optional - used only by the
-   * date tiebreaker, and only when every candidate still in the running also
-   * carries a date. Never used by any earlier stage, so an order with no date
-   * classifies exactly as it would without the tiebreaker.
+   * When the order was placed (ISO timestamp). Optional - read only by rules that
+   * order candidates in time: the date tiebreak here, and the chronological
+   * pairing of same-day duplicate orders in `reconcile.ts`. Never used by
+   * identity or by the amount, so an order with no timestamp classifies exactly
+   * as it would without those rules.
    */
   orderDate?: string;
 }
@@ -97,12 +99,6 @@ export interface MatchInvoiceCandidate {
   clientFirstName?: string;
   clientLastName?: string;
   clientCompanyName?: string;
-  /**
-   * Line positions. Empty when the candidate has not been detail-fetched yet -
-   * `positionsOverlap` then correctly reports no overlap, so an un-fetched
-   * candidate can never pass stage 3 by omission.
-   */
-  services: MatchOrderItem[];
 }
 
 export interface MatchResult {
@@ -110,9 +106,9 @@ export interface MatchResult {
   classification: MatchClassification;
   /** The matched invoice; present only when `classification === "matched"`. */
   invoice?: MatchInvoiceCandidate;
-  /** How many invoices survived stage 3 (identity + total + positions). */
-  confirmedCount: number;
-  /** How many passed the identity stage, before totals/positions narrowed them. */
+  /** How many invoices survived every stage (identity + gross total). */
+  survivorCount: number;
+  /** How many passed the identity stage, before the total narrowed them. */
   identityCount: number;
   /** Human-readable signals for the dry-run report. */
   reasons: string[];
@@ -151,14 +147,6 @@ export function normalizeName(name: string): string {
       .toLowerCase()
       .replaceAll(/\s+/gu, " ")
   );
-}
-
-/** A name normalization plus punctuation strip - line names carry SKUs and units. */
-export function normalizeItemName(name: string): string {
-  return normalizeName(name)
-    .replaceAll(/[^\p{L}\p{N} ]+/gu, " ")
-    .replaceAll(/\s+/gu, " ")
-    .trim();
 }
 
 // --- Stage 1: identity ---
@@ -216,49 +204,7 @@ export function filterByTotal(
   return candidates.filter((candidate) => totalsMatch(order, candidate));
 }
 
-// --- Stage 3: line-position overlap ---
-
-function itemNamesOverlap(orderItemName: string, positionName: string): boolean {
-  const a = normalizeItemName(orderItemName);
-  const b = normalizeItemName(positionName);
-  if (!(a && b)) {
-    return false;
-  }
-  return a === b || a.includes(b) || b.includes(a);
-}
-
-/**
- * Every order line must find a distinct, unconsumed invoice position with a
- * matching (normalized, similar) name and an equal quantity. Order-independent:
- * positions are consumed greedily as items are matched against them, so
- * permutations do not affect the result.
- *
- * Deliberately strict - EVERY order item must be covered, not "most of them" -
- * because a partial match on line items is exactly the kind of near-miss that
- * makes a wrong invoice look plausible.
- */
-export function positionsOverlap(
-  order: MatchOrderInput,
-  candidate: MatchInvoiceCandidate,
-): boolean {
-  if (order.items.length === 0 || candidate.services.length === 0) {
-    return false;
-  }
-  const remaining = [...candidate.services];
-  for (const item of order.items) {
-    const index = remaining.findIndex(
-      (position) =>
-        position.quantity === item.quantity && itemNamesOverlap(item.name, position.name),
-    );
-    if (index === -1) {
-      return false;
-    }
-    remaining.splice(index, 1);
-  }
-  return true;
-}
-
-// --- Stage 4: date tiebreak, only among fully confirmed candidates ---
+// --- Stage 3: date tiebreak, only among candidates that cleared both gates ---
 
 interface DateTiebreak {
   winner: MatchInvoiceCandidate;
@@ -285,21 +231,21 @@ function dayTime(value: string): number {
 }
 
 /**
- * Among invoices that already passed identity, total and line-position
- * confirmation - the otherwise-AMBIGUOUS set - break the tie by nearest invoice
- * date, at calendar-day precision. This never loosens an earlier gate: it only
- * narrows a set that already cleared every check down to the one candidate
- * closest in time, and only when that nearest candidate is unique.
+ * Among invoices that already passed identity and gross total - the
+ * otherwise-AMBIGUOUS set - break the tie by nearest invoice date, at calendar-day
+ * precision. This never loosens an earlier gate: it only narrows a set that
+ * already cleared every check down to the one candidate closest in time, and only
+ * when that nearest candidate is unique.
  *
- * Returns null (stay AMBIGUOUS) when the order has no date, when any confirmed
+ * Returns null (stay AMBIGUOUS) when the order has no date, when any surviving
  * candidate has no invoice date (an un-dated candidate cannot be ruled in or out,
  * so the tiebreak cannot be trusted), or when two candidates tie exactly.
  */
 function tiebreakByDate(
   orderDate: string | undefined,
-  confirmed: MatchInvoiceCandidate[],
+  survivors: MatchInvoiceCandidate[],
 ): DateTiebreak | null {
-  if (!orderDate || confirmed.length < 2) {
+  if (!orderDate || survivors.length < 2) {
     return null;
   }
   const orderTime = dayTime(orderDate);
@@ -308,7 +254,7 @@ function tiebreakByDate(
   }
 
   const distances: { candidate: MatchInvoiceCandidate; distanceMs: number }[] = [];
-  for (const candidate of confirmed) {
+  for (const candidate of survivors) {
     if (!candidate.invoiceDate) {
       return null;
     }
@@ -328,7 +274,7 @@ function tiebreakByDate(
 
   const winner = onlyNearest.candidate;
   return {
-    reason: `${confirmed.length} candidates passed all signals - chose the invoice dated ${dayPrefix(winner.invoiceDate ?? "")}, nearest to the order date ${dayPrefix(orderDate)}`,
+    reason: `${survivors.length} candidates passed all signals - chose the invoice dated ${dayPrefix(winner.invoiceDate ?? "")}, nearest to the order date ${dayPrefix(orderDate)}`,
     winner,
   };
 }
@@ -339,7 +285,6 @@ function buildReasons(
   order: MatchOrderInput,
   identityCount: number,
   totalCount: number,
-  confirmedCount: number,
 ): string[] {
   const identityReason = order.isCompany
     ? `NIP match: ${identityCount} invoice(s)`
@@ -349,87 +294,78 @@ function buildReasons(
     order.grossTotal === null
       ? "Gross total could not be read off the order, so no invoice could match on amount"
       : `Gross total ${order.grossTotal} matched on ${totalCount} of those`,
-    `Line positions confirmed on ${confirmedCount} of those`,
   ];
 }
 
 /**
- * Classify one order from candidates that are ALREADY the identity + total
- * survivors, now carrying their fetched `services`. The shared tail end both
- * `classifyOrder` and a production report builder call, so the
- * MATCHED/AMBIGUOUS/NO_MATCH rule lives in exactly one place.
+ * Classify one order from candidates that ALREADY cleared identity and total. The
+ * shared tail end both `classifyOrder` and a caller that narrowed the candidates
+ * itself use, so the MATCHED/AMBIGUOUS/NO_MATCH rule lives in exactly one place.
  */
 export function classifyFromConfirmed(
   order: Pick<MatchOrderInput, "orderId" | "orderDate">,
   identityCount: number,
   totalMatchedCount: number,
-  confirmed: MatchInvoiceCandidate[],
+  survivors: MatchInvoiceCandidate[],
 ): MatchResult {
   const reasons: string[] = [
-    `${identityCount} invoice(s) matched by identity, ${totalMatchedCount} of those by gross total, ${confirmed.length} confirmed by line positions.`,
+    `${identityCount} invoice(s) matched by identity, ${totalMatchedCount} of those by gross total.`,
   ];
 
-  if (confirmed.length === 1) {
+  if (survivors.length === 1) {
     return {
       classification: "matched",
-      confirmedCount: 1,
       identityCount,
-      invoice: confirmed[0],
+      invoice: survivors[0],
       orderId: order.orderId,
       reasons,
+      survivorCount: 1,
     };
   }
-  if (confirmed.length > 1) {
-    const tiebreak = tiebreakByDate(order.orderDate, confirmed);
+  if (survivors.length > 1) {
+    const tiebreak = tiebreakByDate(order.orderDate, survivors);
     if (tiebreak) {
       reasons.push(tiebreak.reason);
       return {
         classification: "matched",
-        confirmedCount: confirmed.length,
         identityCount,
         invoice: tiebreak.winner,
         orderId: order.orderId,
         reasons,
+        survivorCount: survivors.length,
       };
     }
-    reasons.push(`Ambiguous: ${confirmed.map((c) => c.number ?? c.uuid).join(", ")}`);
+    reasons.push(`Ambiguous: ${survivors.map((c) => c.number ?? c.uuid).join(", ")}`);
     return {
       classification: "ambiguous",
-      confirmedCount: confirmed.length,
       identityCount,
       orderId: order.orderId,
       reasons,
+      survivorCount: survivors.length,
     };
   }
   return {
     classification: "no_match",
-    confirmedCount: 0,
     identityCount,
     orderId: order.orderId,
     reasons,
+    survivorCount: 0,
   };
 }
 
-/**
- * Full path for callers that already hold every candidate's line positions: runs
- * all three stages and classifies.
- */
+/** Full path: run both gates over raw candidates and classify what survives. */
 export function classifyOrder(
   order: MatchOrderInput,
   candidates: MatchInvoiceCandidate[],
 ): MatchResult {
   const identity = filterByIdentity(order, candidates);
-  const totalMatched = filterByTotal(order, identity);
-  const confirmed = totalMatched.filter((candidate) => positionsOverlap(order, candidate));
-  const result = classifyFromConfirmed(order, identity.length, totalMatched.length, confirmed);
+  const survivors = filterByTotal(order, identity);
+  const result = classifyFromConfirmed(order, identity.length, survivors.length, survivors);
   // Prefer the richer stage-specific reasons built from `order` context, but keep
   // whatever classifyFromConfirmed appended after its summary line - the ambiguous
   // listing, or the tiebreak explanation - since neither is reconstructable here
   // without duplicating the tiebreak logic.
   const appended = result.reasons.slice(1);
-  result.reasons = [
-    ...buildReasons(order, identity.length, totalMatched.length, confirmed.length),
-    ...appended,
-  ];
+  result.reasons = [...buildReasons(order, identity.length, survivors.length), ...appended];
   return result;
 }
