@@ -14,6 +14,8 @@ import {
   toast,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { ReconcilePanel } from "../../../components/reconcile-panel";
 import { sdk } from "../../../lib/sdk";
 import type { InfaktSettings, OverviewResponse } from "../../../lib/types";
@@ -22,21 +24,51 @@ type KsefMode = "nip-only" | "all" | "never";
 type TriggerEvent = "payment.captured" | "order.placed";
 type Environment = "production" | "sandbox";
 
-const KSEF_MODE_OPTIONS: readonly { value: KsefMode; label: string }[] = [
-  { label: "NIP only - B2B invoices, mandatory in Poland from April 2026", value: "nip-only" },
-  { label: "All invoices, including consumer ones", value: "all" },
-  { label: "Never - development only, breaks the KSeF filing obligation", value: "never" },
-];
+const useKsefModeOptions = (): readonly { value: KsefMode; label: string }[] => {
+  const { t } = useTranslation();
+  return [
+    {
+      label: t(
+        "infakt.settings.ksefModeNipOnly",
+        "NIP only - B2B invoices, mandatory in Poland from April 2026",
+      ),
+      value: "nip-only",
+    },
+    {
+      label: t("infakt.settings.ksefModeAll", "All invoices, including consumer ones"),
+      value: "all",
+    },
+    {
+      label: t(
+        "infakt.settings.ksefModeNever",
+        "Never - development only, breaks the KSeF filing obligation",
+      ),
+      value: "never",
+    },
+  ];
+};
 
-const TRIGGER_EVENT_OPTIONS: readonly { value: TriggerEvent; label: string }[] = [
-  { label: "payment.captured - queue once a payment is captured", value: "payment.captured" },
-  { label: "order.placed - queue as soon as the order is placed", value: "order.placed" },
-];
+const useTriggerEventOptions = (): readonly { value: TriggerEvent; label: string }[] => {
+  const { t } = useTranslation();
+  return [
+    {
+      label: `payment.captured - ${t("infakt.settings.triggerEventPaymentCaptured", "queue once a payment is captured")}`,
+      value: "payment.captured",
+    },
+    {
+      label: `order.placed - ${t("infakt.settings.triggerEventOrderPlaced", "queue as soon as the order is placed")}`,
+      value: "order.placed",
+    },
+  ];
+};
 
-const ENVIRONMENT_OPTIONS: readonly { value: Environment; label: string }[] = [
-  { label: "Production", value: "production" },
-  { label: "Sandbox", value: "sandbox" },
-];
+const useEnvironmentOptions = (): readonly { value: Environment; label: string }[] => {
+  const { t } = useTranslation();
+  return [
+    { label: t("infakt.settings.environmentProduction", "Production"), value: "production" },
+    { label: t("infakt.settings.environmentSandbox", "Sandbox"), value: "sandbox" },
+  ];
+};
 
 /**
  * The inFakt plugin's admin Settings page.
@@ -62,6 +94,11 @@ const ENVIRONMENT_OPTIONS: readonly { value: Environment; label: string }[] = [
  * page can only report whether an override is configured, never what it is.
  */
 const InfaktSettingsPage = () => {
+  const { t } = useTranslation();
+  const KSEF_MODE_OPTIONS = useKsefModeOptions();
+  const TRIGGER_EVENT_OPTIONS = useTriggerEventOptions();
+  const ENVIRONMENT_OPTIONS = useEnvironmentOptions();
+
   const [data, setData] = useState<OverviewResponse | undefined>();
   const [settings, setSettings] = useState<InfaktSettings | undefined>();
   const [loadError, setLoadError] = useState<string | undefined>();
@@ -88,10 +125,12 @@ const InfaktSettingsPage = () => {
       setLoadError(undefined);
     } catch (error) {
       setLoadError(
-        error instanceof Error ? error.message : "Could not load the inFakt configuration.",
+        error instanceof Error
+          ? error.message
+          : t("infakt.settings.loadError", "Could not load the inFakt configuration."),
       );
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -121,9 +160,17 @@ const InfaktSettingsPage = () => {
         method: "POST",
       });
       setSettings(result);
-      toast.success(result.invoicing_paused ? "Invoicing paused." : "Invoicing resumed.");
+      toast.success(
+        result.invoicing_paused
+          ? t("infakt.settings.pausedToast", "Invoicing paused.")
+          : t("infakt.settings.resumedToast", "Invoicing resumed."),
+      );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not change the pause switch.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("infakt.settings.pauseError", "Could not change the pause switch."),
+      );
     } finally {
       setPausing(false);
     }
@@ -149,9 +196,13 @@ const InfaktSettingsPage = () => {
       setSettings(result);
       setApiKeyInput("");
       await load();
-      toast.success("Configuration saved.");
+      toast.success(t("infakt.settings.configSaved", "Configuration saved."));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not save the configuration.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("infakt.settings.configSaveError", "Could not save the configuration."),
+      );
     } finally {
       setSavingConfig(false);
     }
@@ -165,9 +216,18 @@ const InfaktSettingsPage = () => {
         method: "POST",
       });
       setSettings(result);
-      toast.success("Saved API key removed. The plugin falls back to the key it was installed with, if there is one.");
+      toast.success(
+        t(
+          "infakt.settings.apiKeyCleared",
+          "Saved API key removed. The plugin falls back to the key it was installed with, if there is one.",
+        ),
+      );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not clear the API key override.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("infakt.settings.apiKeyClearError", "Could not clear the API key override."),
+      );
     } finally {
       setClearingApiKey(false);
     }
@@ -181,14 +241,16 @@ const InfaktSettingsPage = () => {
         { method: "POST" },
       );
       if (result.active) {
-        toast.success("KSeF integration is active.");
+        toast.success(t("infakt.settings.ksefActive", "KSeF integration is active."));
       } else {
-        toast.error(result.error ?? "The KSeF integration is not active.");
+        toast.error(result.error ?? t("infakt.settings.ksefInactive", "The KSeF integration is not active."));
       }
       await load();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Could not re-check the KSeF integration.",
+        error instanceof Error
+          ? error.message
+          : t("infakt.settings.ksefCheckError", "Could not re-check the KSeF integration."),
       );
     } finally {
       setCheckingKsef(false);
@@ -206,7 +268,7 @@ const InfaktSettingsPage = () => {
         <div>
           <Heading level="h1">inFakt</Heading>
           <Text className="text-ui-fg-subtle" size="small">
-            Polish invoicing for paid orders.
+            {t("infakt.settings.subtitle", "Polish invoicing for paid orders.")}
           </Text>
         </div>
         {config ? (
@@ -215,7 +277,11 @@ const InfaktSettingsPage = () => {
               {config.environment}
             </Badge>
             <StatusBadge color={active ? (ksefUnhealthy ? "orange" : "green") : "red"}>
-              {active ? (ksefUnhealthy ? "needs attention" : "active") : (settings?.reason ?? "-")}
+              {active
+                ? ksefUnhealthy
+                  ? t("infakt.settings.statusNeedsAttention", "needs attention")
+                  : t("infakt.settings.statusActive", "active")
+                : (settings?.reason ?? "-")}
             </StatusBadge>
           </div>
         ) : null}
@@ -232,11 +298,15 @@ const InfaktSettingsPage = () => {
           <Alert variant="error">
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
               <span>
-                The inFakt account has no active KSeF integration, so B2B invoices cannot be filed.
-                Fix it in inFakt, then re-check here.
+                {t(
+                  "infakt.settings.ksefUnhealthyAlert",
+                  "The inFakt account has no active KSeF integration, so B2B invoices cannot be filed. Fix it in inFakt, then re-check here.",
+                )}
               </span>
               <Button disabled={checkingKsef} onClick={() => void recheckKsef()} size="small">
-                {checkingKsef ? "Checking..." : "Re-check KSeF"}
+                {checkingKsef
+                  ? t("infakt.settings.checking", "Checking...")
+                  : t("infakt.settings.recheckKsef", "Re-check KSeF")}
               </Button>
             </div>
           </Alert>
@@ -245,11 +315,11 @@ const InfaktSettingsPage = () => {
 
       <div className="px-6 py-4">
         <div className="mb-3 flex items-center justify-between">
-          <Heading level="h2">Invoicing</Heading>
+          <Heading level="h2">{t("infakt.settings.invoicingHeading", "Invoicing")}</Heading>
         </div>
         {settings && !active ? (
           <Alert className="mb-3" variant="warning">
-            {describeInactiveReason(settings)}
+            {describeInactiveReason(t, settings)}
           </Alert>
         ) : null}
         <div className="flex items-center gap-x-3">
@@ -259,29 +329,35 @@ const InfaktSettingsPage = () => {
             id="infakt-invoicing-paused"
             onCheckedChange={() => void togglePause()}
           />
-          <Label htmlFor="infakt-invoicing-paused">Invoicing enabled</Label>
+          <Label htmlFor="infakt-invoicing-paused">
+            {t("infakt.settings.invoicingEnabledLabel", "Invoicing enabled")}
+          </Label>
         </div>
         {settings?.env_force_disabled ? (
           <Alert className="mt-3" variant="warning">
-            <code>INFAKT_INVOICING_DISABLED</code> forces invoicing off regardless of this switch.
-            Unset it to let the switch above govern again.
+            <code>INFAKT_INVOICING_DISABLED</code>{" "}
+            {t(
+              "infakt.settings.envForceNotice",
+              "forces invoicing off regardless of this switch. Unset it to let the switch above govern again.",
+            )}
           </Alert>
         ) : null}
       </div>
 
       <div className="px-6 py-4">
         <div className="mb-3">
-          <Heading level="h2">Configuration</Heading>
+          <Heading level="h2">{t("infakt.settings.configHeading", "Configuration")}</Heading>
           <Text className="text-ui-fg-subtle" size="small">
-            Changes here take effect on the next order or worker tick - no redeploy, no restart.
-            A field left as it loaded is not resaved: it keeps following however this plugin was
-            configured at install time.
+            {t(
+              "infakt.settings.configDescription",
+              "Changes here apply from the next order onward - no redeploy, no restart needed. A field left unchanged keeps using whatever this plugin was configured with at install.",
+            )}
           </Text>
         </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
-            <Label htmlFor="infakt-currency">Currency</Label>
+            <Label htmlFor="infakt-currency">{t("infakt.settings.currencyLabel", "Currency")}</Label>
             <Input
               id="infakt-currency"
               onChange={(event) => setCurrency(event.target.value)}
@@ -291,7 +367,9 @@ const InfaktSettingsPage = () => {
           </div>
 
           <div>
-            <Label htmlFor="infakt-environment">Environment</Label>
+            <Label htmlFor="infakt-environment">
+              {t("infakt.settings.environmentLabel", "Environment")}
+            </Label>
             <Select
               onValueChange={(value) => setEnvironment(value as Environment)}
               value={environment}
@@ -310,7 +388,9 @@ const InfaktSettingsPage = () => {
           </div>
 
           <div>
-            <Label htmlFor="infakt-trigger-event">Invoice orders on</Label>
+            <Label htmlFor="infakt-trigger-event">
+              {t("infakt.settings.triggerEventLabel", "Invoice orders on")}
+            </Label>
             <Select
               onValueChange={(value) => setTriggerEvent(value as TriggerEvent)}
               value={triggerEvent}
@@ -329,7 +409,9 @@ const InfaktSettingsPage = () => {
           </div>
 
           <div>
-            <Label htmlFor="infakt-ksef-mode">Send to KSeF</Label>
+            <Label htmlFor="infakt-ksef-mode">
+              {t("infakt.settings.ksefModeLabel", "Send to KSeF")}
+            </Label>
             <Select onValueChange={(value) => setKsefMode(value as KsefMode)} value={ksefMode}>
               <Select.Trigger id="infakt-ksef-mode">
                 <Select.Value />
@@ -346,11 +428,16 @@ const InfaktSettingsPage = () => {
         </div>
 
         <div className="mt-4">
-          <Label htmlFor="infakt-api-key">API key</Label>
+          <Label htmlFor="infakt-api-key">{t("infakt.settings.apiKeyLabel", "API key")}</Label>
           <Text className="text-ui-fg-subtle mb-2" size="small">
-            Write-only: a previously saved key is never shown here, only whether one is configured.{" "}
+            {t(
+              "infakt.settings.apiKeyWriteOnly",
+              "A previously saved key is never shown here again - only whether one is configured.",
+            )}{" "}
             <StatusBadge color={settings?.api_key_configured ? "green" : "grey"}>
-              {settings?.api_key_configured ? "configured" : "not configured"}
+              {settings?.api_key_configured
+                ? t("infakt.settings.configured", "configured")
+                : t("infakt.settings.notConfigured", "not configured")}
             </StatusBadge>
           </Text>
           <div className="flex items-center gap-x-2">
@@ -360,8 +447,8 @@ const InfaktSettingsPage = () => {
               onChange={(event) => setApiKeyInput(event.target.value)}
               placeholder={
                 settings?.api_key_override_configured
-                  ? "Enter a new key to replace the saved one"
-                  : "Enter a key to use instead of the installed one"
+                  ? t("infakt.settings.apiKeyPlaceholderReplace", "Enter a new key to replace the saved one")
+                  : t("infakt.settings.apiKeyPlaceholderNew", "Enter a key to use instead of the installed one")
               }
               type="password"
               value={apiKeyInput}
@@ -373,7 +460,7 @@ const InfaktSettingsPage = () => {
                 size="small"
                 variant="secondary"
               >
-                Clear override
+                {t("infakt.settings.clearOverride", "Clear override")}
               </Button>
             ) : null}
           </div>
@@ -381,7 +468,9 @@ const InfaktSettingsPage = () => {
 
         <div className="mt-4 flex justify-end">
           <Button disabled={savingConfig || !settings} onClick={() => void saveConfig()}>
-            {savingConfig ? "Saving..." : "Save configuration"}
+            {savingConfig
+              ? t("infakt.settings.saving", "Saving...")
+              : t("infakt.settings.saveConfig", "Save configuration")}
           </Button>
         </div>
       </div>
@@ -391,16 +480,26 @@ const InfaktSettingsPage = () => {
       {config ? (
         <div className="px-6 py-4">
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
-            <Field label="Invoicing orders from">{config.startDate ?? "no date floor"}</Field>
-            <Field label="VAT rate symbol">{config.taxSymbol}</Field>
-            <Field label="KSeF verified at startup">
-              {config.ksefRequireActive ? "yes" : "no"}
+            <Field label={t("infakt.settings.fields.invoicingFrom", "Invoicing orders from")}>
+              {config.startDate ?? t("infakt.settings.noDateFloor", "no date floor")}
             </Field>
-            <Field label="Emits infakt.invoice.issued">
-              {config.emitIssuedEvent ? "yes" : "no"}
+            <Field label={t("infakt.settings.fields.vatSymbol", "VAT rate symbol")}>
+              {config.taxSymbol}
             </Field>
-            <Field label="Needs review">{data?.counts.needs_review ?? 0}</Field>
-            <Field label="Issued">{data?.counts.done ?? 0}</Field>
+            <Field label={t("infakt.settings.fields.ksefVerifiedAtStartup", "KSeF verified at startup")}>
+              {config.ksefRequireActive
+                ? t("infakt.common.yes", "yes")
+                : t("infakt.common.no", "no")}
+            </Field>
+            <Field label={t("infakt.settings.fields.emitsEvent", "Emits infakt.invoice.issued")}>
+              {config.emitIssuedEvent
+                ? t("infakt.common.yes", "yes")
+                : t("infakt.common.no", "no")}
+            </Field>
+            <Field label={t("infakt.settings.fields.needsReview", "Needs review")}>
+              {data?.counts.needs_review ?? 0}
+            </Field>
+            <Field label={t("infakt.settings.fields.issued", "Issued")}>{data?.counts.done ?? 0}</Field>
           </dl>
         </div>
       ) : null}
@@ -408,19 +507,28 @@ const InfaktSettingsPage = () => {
   );
 };
 
-const describeInactiveReason = (settings: InfaktSettings): string => {
+const describeInactiveReason = (t: TFunction, settings: InfaktSettings): string => {
   switch (settings.reason) {
     case "env_force_disabled": {
-      return "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.";
+      return t(
+        "infakt.settings.inactive.envForceDisabled",
+        "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.",
+      );
     }
     case "no_api_key": {
-      return "No order will be invoiced: no inFakt API key is configured, here or at install time.";
+      return t(
+        "infakt.settings.inactive.noApiKey",
+        "No order will be invoiced: no inFakt API key is configured, here or at install time.",
+      );
     }
     case "paused": {
-      return "Invoicing is paused. No order will be invoiced until it is resumed.";
+      return t(
+        "infakt.settings.inactive.paused",
+        "Invoicing is paused. No order will be invoiced until it is resumed.",
+      );
     }
     default: {
-      return "Invoicing is currently off.";
+      return t("infakt.settings.inactive.default", "Invoicing is currently off.");
     }
   }
 };

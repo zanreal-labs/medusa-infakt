@@ -1,0 +1,169 @@
+{
+  "infakt": {
+    "common": {
+      "cancel": "Cancel",
+      "yes": "yes",
+      "no": "no"
+    },
+    "orderWidget": {
+      "heading": "Invoicing",
+      "dismiss": "Dismiss",
+      "loading": "Loading invoicing status...",
+      "actionDone": "Done.",
+      "queued": "Queued.",
+      "loadError": "Could not load the invoicing status for this order.",
+      "actionRefused": "The action was refused.",
+      "enqueueError": "Could not queue this order for invoicing.",
+      "status": {
+        "done": "Issued",
+        "needsReview": "Needs review",
+        "pending": "Awaiting",
+        "processing": "Awaiting",
+        "skipped": "Skipped"
+      },
+      "inactive": {
+        "envForceDisabled": "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.",
+        "noApiKey": "Invoicing is disabled: the plugin's apiKey option is not configured.",
+        "paused": "Invoicing is paused.",
+        "default": "Invoicing is currently off."
+      },
+      "notQueuedInactive": "This order has not been queued for invoicing.",
+      "notQueuedActive": "No invoice has been queued for this order. This is expected for an order placed before the plugin was installed, or if its trigger event was missed.",
+      "queueButton": "Queue for invoicing",
+      "ksef": {
+        "notTracked": "not tracked by this plugin",
+        "pending": "pending",
+        "notApplicable": "not applicable"
+      },
+      "fields": {
+        "invoiceNumber": "Invoice number",
+        "ksef": "KSeF",
+        "buyer": "Buyer",
+        "skippedOn": "Skipped on",
+        "issuedOn": "Issued on"
+      },
+      "crashWindowDetail": "A previous attempt may have reached inFakt. Look for a stray invoice there, then link it or clear this one.",
+      "issuedNumberPending": "issued (number pending)",
+      "buyerCompany": "company (B2B)",
+      "buyerConsumer": "consumer",
+      "adoptedSuffix": "(adopted/imported)",
+      "attemptLabel": "attempt",
+      "viewPdf": "View PDF",
+      "pdfOpenError": "Could not open the invoice PDF.",
+      "pdfFetchError": "The PDF could not be fetched (HTTP {{status}}).",
+      "retry": "Retry",
+      "linkInvoiceButton": "Link invoice",
+      "linkInvoiceDialog": {
+        "title": "Link an existing inFakt invoice",
+        "description": "Find the invoice for this order in inFakt and paste its UUID. This order will use that invoice instead - no new invoice is created.",
+        "action": "Link"
+      },
+      "clearButton": "No invoice in inFakt",
+      "clearDialog": {
+        "title": "Allow the invoice to be created again?",
+        "descriptionBeforeStrong": "Only confirm this if you have checked inFakt and there is",
+        "descriptionStrong": "no",
+        "descriptionAfterStrong": "invoice for this order. If one exists, this will issue a second one, and undoing that needs a formal corrective invoice.",
+        "action": "I checked - there is no invoice"
+      },
+      "skipButton": "Skip",
+      "skipDialog": {
+        "title": "Do not invoice this order",
+        "description": "A reason is required and is kept on the record - skipping is a decision not to issue a document you may be required to issue.",
+        "reasonPlaceholder": "e.g. test order, invoiced manually outside Medusa, duplicate of order ...",
+        "action": "Skip"
+      }
+    },
+    "reconcile": {
+      "heading": "Adopt existing invoices",
+      "description": "Finds invoices that already exist in inFakt for orders this plugin has no record of, and matches them on the order data alone - the issue date, the buyer and the gross total. It never creates an invoice and never files anything to KSeF. Orders that already have an invoice record are left alone.",
+      "fromLabel": "Orders placed from",
+      "toLabel": "to",
+      "toleranceLabel": "Issue date tolerance (days)",
+      "preview": "Preview",
+      "working": "Working...",
+      "adoptAllMatched": "Adopt all matched ({{count}})",
+      "previewSummary": "{{adopt}} of {{scanned}} order(s) matched an invoice in inFakt.",
+      "previewError": "Could not read the reconciliation report.",
+      "adoptedOne": "1 invoice adopted.",
+      "adoptedMany": "{{count}} invoices adopted.",
+      "adoptError": "Could not adopt the selected invoices.",
+      "refusedWarning": "{{count}} order(s) were not adopted - the match no longer held when the server re-checked it.",
+      "reportSummary": "Scanned {{scanned}} order(s) with no invoice record against {{considered}} invoice(s) in inFakt: {{adopt}} matched, {{ambiguous}} need review, {{noMatch}} found nothing.",
+      "truncatedWarning": "The window held more orders or invoices than one pass reads. Narrow the dates and run it again, or some orders will not have been considered at all.",
+      "skippedWarning": "{{count}} order(s) were skipped because an invoice record already existed for them.",
+      "nothingToAdopt": "Every order in this window already has an invoice record. There is nothing to adopt.",
+      "columns": {
+        "order": "Order",
+        "result": "Result",
+        "invoice": "Invoice",
+        "evidence": "Evidence"
+      },
+      "decision": {
+        "adopt": "Match",
+        "ambiguous": "Needs review",
+        "noMatch": "No invoice found"
+      },
+      "adoptOne": "Adopt"
+    },
+    "settings": {
+      "subtitle": "Polish invoicing for paid orders.",
+      "statusNeedsAttention": "needs attention",
+      "statusActive": "active",
+      "ksefUnhealthyAlert": "The inFakt account has no active KSeF integration, so B2B invoices cannot be filed. Fix it in inFakt, then re-check here.",
+      "recheckKsef": "Re-check KSeF",
+      "checking": "Checking...",
+      "invoicingHeading": "Invoicing",
+      "invoicingEnabledLabel": "Invoicing enabled",
+      "envForceNotice": "forces invoicing off regardless of this switch. Unset it to let the switch above govern again.",
+      "configHeading": "Configuration",
+      "configDescription": "Changes here apply from the next order onward - no redeploy, no restart needed. A field left unchanged keeps using whatever this plugin was configured with at install.",
+      "currencyLabel": "Currency",
+      "environmentLabel": "Environment",
+      "environmentProduction": "Production",
+      "environmentSandbox": "Sandbox",
+      "triggerEventLabel": "Invoice orders on",
+      "triggerEventPaymentCaptured": "queue once a payment is captured",
+      "triggerEventOrderPlaced": "queue as soon as the order is placed",
+      "ksefModeLabel": "Send to KSeF",
+      "ksefModeNipOnly": "NIP only - B2B invoices, mandatory in Poland from April 2026",
+      "ksefModeAll": "All invoices, including consumer ones",
+      "ksefModeNever": "Never - development only, breaks the KSeF filing obligation",
+      "apiKeyLabel": "API key",
+      "apiKeyWriteOnly": "A previously saved key is never shown here again - only whether one is configured.",
+      "configured": "configured",
+      "notConfigured": "not configured",
+      "apiKeyPlaceholderReplace": "Enter a new key to replace the saved one",
+      "apiKeyPlaceholderNew": "Enter a key to use instead of the installed one",
+      "clearOverride": "Clear override",
+      "saveConfig": "Save configuration",
+      "saving": "Saving...",
+      "pausedToast": "Invoicing paused.",
+      "resumedToast": "Invoicing resumed.",
+      "pauseError": "Could not change the pause switch.",
+      "configSaved": "Configuration saved.",
+      "configSaveError": "Could not save the configuration.",
+      "apiKeyCleared": "Saved API key removed. The plugin falls back to the key it was installed with, if there is one.",
+      "apiKeyClearError": "Could not clear the API key override.",
+      "ksefActive": "KSeF integration is active.",
+      "ksefInactive": "The KSeF integration is not active.",
+      "ksefCheckError": "Could not re-check the KSeF integration.",
+      "loadError": "Could not load the inFakt configuration.",
+      "inactive": {
+        "envForceDisabled": "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.",
+        "noApiKey": "No order will be invoiced: no inFakt API key is configured, here or at install time.",
+        "paused": "Invoicing is paused. No order will be invoiced until it is resumed.",
+        "default": "Invoicing is currently off."
+      },
+      "fields": {
+        "invoicingFrom": "Invoicing orders from",
+        "vatSymbol": "VAT rate symbol",
+        "ksefVerifiedAtStartup": "KSeF verified at startup",
+        "emitsEvent": "Emits infakt.invoice.issued",
+        "needsReview": "Needs review",
+        "issued": "Issued"
+      },
+      "noDateFloor": "no date floor"
+    }
+  }
+}

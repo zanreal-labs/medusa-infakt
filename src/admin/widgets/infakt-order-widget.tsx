@@ -11,6 +11,8 @@ import {
   Textarea,
 } from "@medusajs/ui";
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { sdk } from "../lib/sdk";
 import type {
   InfaktInvoiceRow,
@@ -54,12 +56,27 @@ const STATUS_COLOR: Record<InvoiceStatus, "green" | "orange" | "red" | "grey" | 
   skipped: "orange",
 };
 
-const STATUS_LABEL: Record<InvoiceStatus, string> = {
-  done: "Issued",
-  needs_review: "Needs review",
-  pending: "Awaiting",
-  processing: "Awaiting",
-  skipped: "Skipped",
+const statusLabel = (t: TFunction, status: InvoiceStatus): string => {
+  switch (status) {
+    case "done": {
+      return t("infakt.orderWidget.status.done", "Issued");
+    }
+    case "needs_review": {
+      return t("infakt.orderWidget.status.needsReview", "Needs review");
+    }
+    case "pending": {
+      return t("infakt.orderWidget.status.pending", "Awaiting");
+    }
+    case "processing": {
+      return t("infakt.orderWidget.status.processing", "Awaiting");
+    }
+    case "skipped": {
+      return t("infakt.orderWidget.status.skipped", "Skipped");
+    }
+    default: {
+      return status;
+    }
+  }
 };
 
 interface WidgetOrder {
@@ -108,7 +125,15 @@ const errorMessage = (error: unknown, fallback: string): string => {
  *  - anything still in flight (`pending`, `processing`, `needs_review`) has not
  *    reached the decision step yet, so "pending" is still the honest answer.
  */
-export const describeKsef = (row: InfaktInvoiceRow): string | null => {
+// `describeKsef` is exercised directly by unit tests, outside any component
+// render, so it cannot rely on `useTranslation()`. It takes the real `t` at
+// its one call site inside `RowDetail` below; every other caller (the test
+// suite) gets this identity-style default, which returns the given English
+// text exactly as the function did before it had any i18n awareness.
+const identityT: TFunction = ((_key: string, defaultValue?: string) =>
+  defaultValue ?? _key) as TFunction;
+
+export const describeKsef = (row: InfaktInvoiceRow, t: TFunction = identityT): string | null => {
   if (row.ksef_number) {
     return row.ksef_number;
   }
@@ -127,18 +152,23 @@ export const describeKsef = (row: InfaktInvoiceRow): string | null => {
     // "queued": the document was issued elsewhere, long before this ledger knew
     // about it, and nothing here will ever submit it. Saying "pending" would
     // promise a filing that is not coming.
-    return row.adopted_at && row.status === "done" ? "not tracked by this plugin" : "pending";
+    return row.adopted_at && row.status === "done"
+      ? t("infakt.orderWidget.ksef.notTracked", "not tracked by this plugin")
+      : t("infakt.orderWidget.ksef.pending", "pending");
   }
   if (row.status === "skipped") {
-    return "not applicable";
+    return t("infakt.orderWidget.ksef.notApplicable", "not applicable");
   }
   if (row.status === "done") {
-    return row.is_company ? "not tracked by this plugin" : null;
+    return row.is_company
+      ? t("infakt.orderWidget.ksef.notTracked", "not tracked by this plugin")
+      : null;
   }
-  return "pending";
+  return t("infakt.orderWidget.ksef.pending", "pending");
 };
 
 const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
+  const { t } = useTranslation();
   const orderId = data?.id;
   const [row, setRow] = useState<InfaktInvoiceRow | undefined>();
   const [settings, setSettings] = useState<InfaktSettings | undefined>();
@@ -164,11 +194,16 @@ const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
       setSettings(settingsResponse);
       setLoadError(undefined);
     } catch (error) {
-      setLoadError(errorMessage(error, "Could not load the invoicing status for this order."));
+      setLoadError(
+        errorMessage(
+          error,
+          t("infakt.orderWidget.loadError", "Could not load the invoicing status for this order."),
+        ),
+      );
     } finally {
       setLoaded(true);
     }
-  }, [orderId]);
+  }, [orderId, t]);
 
   useEffect(() => {
     void load();
@@ -183,12 +218,12 @@ const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
         body,
         method: "POST",
       });
-      setNotice(result?.note ?? "Done.");
+      setNotice(result?.note ?? t("infakt.orderWidget.actionDone", "Done."));
       await load();
     } catch (error) {
       // A 409 carries the refusal reason - the whole value of the action. Shown
       // inline and dismissible, never a crashed panel.
-      setLoadError(errorMessage(error, "The action was refused."));
+      setLoadError(errorMessage(error, t("infakt.orderWidget.actionRefused", "The action was refused.")));
     } finally {
       setBusy(false);
     }
@@ -206,10 +241,12 @@ const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
         body: { order_id: orderId },
         method: "POST",
       });
-      setNotice(result?.note ?? "Queued.");
+      setNotice(result?.note ?? t("infakt.orderWidget.queued", "Queued."));
       await load();
     } catch (error) {
-      setLoadError(errorMessage(error, "Could not queue this order for invoicing."));
+      setLoadError(
+        errorMessage(error, t("infakt.orderWidget.enqueueError", "Could not queue this order for invoicing.")),
+      );
     } finally {
       setBusy(false);
     }
@@ -217,14 +254,14 @@ const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
 
   const badge = row ? (
     <StatusBadge color={STATUS_COLOR[row.status] ?? "grey"}>
-      {STATUS_LABEL[row.status] ?? row.status}
+      {statusLabel(t, row.status)}
     </StatusBadge>
   ) : null;
 
   return (
     <Container className="divide-y p-0">
       <div className="flex items-center justify-between px-6 py-4">
-        <Heading level="h2">Invoicing</Heading>
+        <Heading level="h2">{t("infakt.orderWidget.heading", "Invoicing")}</Heading>
         {badge}
       </div>
 
@@ -234,7 +271,7 @@ const InfaktOrderWidget = ({ data }: { data: WidgetOrder }) => {
             {loadError}
           </Alert>
           <Button onClick={() => setLoadError(undefined)} size="small" variant="transparent">
-            Dismiss
+            {t("infakt.orderWidget.dismiss", "Dismiss")}
           </Button>
         </div>
       ) : null}
@@ -274,10 +311,12 @@ const Body = ({
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
   onEnqueue: () => void;
 }) => {
+  const { t } = useTranslation();
+
   if (!loaded) {
     return (
       <Text className="text-ui-fg-muted" size="small">
-        Loading invoicing status...
+        {t("infakt.orderWidget.loading", "Loading invoicing status...")}
       </Text>
     );
   }
@@ -291,7 +330,8 @@ const Body = ({
   if (reason && reason !== "active") {
     return (
       <Text className="text-ui-fg-subtle" size="small">
-        {describeInactive(reason)} This order has not been queued for invoicing.
+        {describeInactive(t, reason)}{" "}
+        {t("infakt.orderWidget.notQueuedInactive", "This order has not been queued for invoicing.")}
       </Text>
     );
   }
@@ -299,29 +339,37 @@ const Body = ({
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
       <Text className="text-ui-fg-subtle" size="small">
-        No invoice has been queued for this order. This is expected for an order placed before the
-        plugin was installed, or if its trigger event was missed.
+        {t(
+          "infakt.orderWidget.notQueuedActive",
+          "No invoice has been queued for this order. This is expected for an order placed before the plugin was installed, or if its trigger event was missed.",
+        )}
       </Text>
       <Button disabled={busy} onClick={onEnqueue} size="small" variant="secondary">
-        Queue for invoicing
+        {t("infakt.orderWidget.queueButton", "Queue for invoicing")}
       </Button>
     </div>
   );
 };
 
-const describeInactive = (reason: InfaktSettings["reason"]): string => {
+const describeInactive = (t: TFunction, reason: InfaktSettings["reason"]): string => {
   switch (reason) {
     case "env_force_disabled": {
-      return "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.";
+      return t(
+        "infakt.orderWidget.inactive.envForceDisabled",
+        "Invoicing is forced off by the INFAKT_INVOICING_DISABLED environment variable.",
+      );
     }
     case "no_api_key": {
-      return "Invoicing is disabled: the plugin's apiKey option is not configured.";
+      return t(
+        "infakt.orderWidget.inactive.noApiKey",
+        "Invoicing is disabled: the plugin's apiKey option is not configured.",
+      );
     }
     case "paused": {
-      return "Invoicing is paused.";
+      return t("infakt.orderWidget.inactive.paused", "Invoicing is paused.");
     }
     default: {
-      return "Invoicing is currently off.";
+      return t("infakt.orderWidget.inactive.default", "Invoicing is currently off.");
     }
   }
 };
@@ -354,9 +402,13 @@ const RowDetail = ({
   busy: boolean;
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
 }) => {
-  const ksef = describeKsef(row);
+  const { t } = useTranslation();
+  const ksef = describeKsef(row, t);
   const detail = row.in_crash_window
-    ? "A previous create may have reached inFakt. Look for a stray invoice there, then link it or clear this row."
+    ? t(
+        "infakt.orderWidget.crashWindowDetail",
+        "A previous attempt may have reached inFakt. Look for a stray invoice there, then link it or clear this one.",
+      )
     : isHistoricalImport(row)
       ? null
       : // Deliberately NOT ksef_decision_reason: for a consumer invoice that
@@ -367,14 +419,29 @@ const RowDetail = ({
   return (
     <div className="flex flex-col gap-y-4">
       <dl className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
-        <Field label="Invoice number">
-          {row.invoice_number ?? (row.invoice_uuid ? "issued (number pending)" : "-")}
+        <Field label={t("infakt.orderWidget.fields.invoiceNumber", "Invoice number")}>
+          {row.invoice_number ??
+            (row.invoice_uuid
+              ? t("infakt.orderWidget.issuedNumberPending", "issued (number pending)")
+              : "-")}
         </Field>
-        {ksef === null ? null : <Field label="KSeF">{ksef}</Field>}
-        <Field label="Buyer">{row.is_company ? "company (B2B)" : "consumer"}</Field>
-        <Field label={row.status === "skipped" ? "Skipped on" : "Issued on"}>
+        {ksef === null ? null : (
+          <Field label={t("infakt.orderWidget.fields.ksef", "KSeF")}>{ksef}</Field>
+        )}
+        <Field label={t("infakt.orderWidget.fields.buyer", "Buyer")}>
+          {row.is_company
+            ? t("infakt.orderWidget.buyerCompany", "company (B2B)")
+            : t("infakt.orderWidget.buyerConsumer", "consumer")}
+        </Field>
+        <Field
+          label={
+            row.status === "skipped"
+              ? t("infakt.orderWidget.fields.skippedOn", "Skipped on")
+              : t("infakt.orderWidget.fields.issuedOn", "Issued on")
+          }
+        >
           {formatDate(row.completed_at)}
-          {row.adopted_at ? " (adopted/imported)" : ""}
+          {row.adopted_at ? ` ${t("infakt.orderWidget.adoptedSuffix", "(adopted/imported)")}` : ""}
         </Field>
       </dl>
 
@@ -383,7 +450,9 @@ const RowDetail = ({
       {detail ? (
         <Text className="text-ui-fg-subtle" size="small">
           {detail}
-          {row.attempts > 0 ? ` (attempt ${row.attempts})` : ""}
+          {row.attempts > 0
+            ? ` (${t("infakt.orderWidget.attemptLabel", "attempt")} ${row.attempts})`
+            : ""}
         </Text>
       ) : null}
 
@@ -408,6 +477,7 @@ const RowDetail = ({
  * Neither set: nothing renders. There is no identifier to try.
  */
 const PdfLink = ({ row }: { row: InfaktInvoiceRow }) => {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
@@ -429,14 +499,19 @@ const PdfLink = ({ row }: { row: InfaktInvoiceRow }) => {
           | { message?: string; error?: string }
           | undefined;
         throw new Error(
-          body?.message ?? body?.error ?? `The PDF could not be fetched (HTTP ${res.status}).`,
+          body?.message ??
+            body?.error ??
+            t("infakt.orderWidget.pdfFetchError", "The PDF could not be fetched (HTTP {{status}}).").replace(
+              "{{status}}",
+              String(res.status),
+            ),
         );
       }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (err) {
-      setError(errorMessage(err, "Could not open the invoice PDF."));
+      setError(errorMessage(err, t("infakt.orderWidget.pdfOpenError", "Could not open the invoice PDF.")));
     } finally {
       setBusy(false);
     }
@@ -446,7 +521,7 @@ const PdfLink = ({ row }: { row: InfaktInvoiceRow }) => {
     <div className="flex flex-col gap-y-1">
       <div>
         <Button disabled={busy} onClick={() => void open()} size="small" variant="secondary">
-          View PDF
+          {t("infakt.orderWidget.viewPdf", "View PDF")}
         </Button>
       </div>
       {error ? (
@@ -467,6 +542,7 @@ const RowActions = ({
   busy: boolean;
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
 }) => {
+  const { t } = useTranslation();
   const terminal = row.status === "done" || row.status === "skipped";
   if (terminal) {
     return null;
@@ -488,7 +564,7 @@ const RowActions = ({
           size="small"
           variant="secondary"
         >
-          Retry
+          {t("infakt.orderWidget.retry", "Retry")}
         </Button>
       )}
       <SkipButton busy={busy} onAct={onAct} row={row} />
@@ -505,20 +581,25 @@ const AdoptButton = ({
   busy: boolean;
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
 }) => {
+  const { t } = useTranslation();
   const [uuid, setUuid] = useState("");
   return (
     <Prompt>
       <Prompt.Trigger asChild>
         <Button disabled={busy} size="small" variant="primary">
-          Link invoice
+          {t("infakt.orderWidget.linkInvoiceButton", "Link invoice")}
         </Button>
       </Prompt.Trigger>
       <Prompt.Content>
         <Prompt.Header>
-          <Prompt.Title>Link an existing inFakt invoice</Prompt.Title>
+          <Prompt.Title>
+            {t("infakt.orderWidget.linkInvoiceDialog.title", "Link an existing inFakt invoice")}
+          </Prompt.Title>
           <Prompt.Description>
-            Find the invoice for this order in inFakt and paste its UUID. The row takes it over and
-            continues from there - no new invoice is created.
+            {t(
+              "infakt.orderWidget.linkInvoiceDialog.description",
+              "Find the invoice for this order in inFakt and paste its UUID. This order will use that invoice instead - no new invoice is created.",
+            )}
           </Prompt.Description>
         </Prompt.Header>
         <div className="px-6 pb-4">
@@ -529,11 +610,11 @@ const AdoptButton = ({
           />
         </div>
         <Prompt.Footer>
-          <Prompt.Cancel>Cancel</Prompt.Cancel>
+          <Prompt.Cancel>{t("infakt.common.cancel", "Cancel")}</Prompt.Cancel>
           <Prompt.Action
             onClick={() => void onAct(row.id, { action: "adopt", invoice_uuid: uuid })}
           >
-            Link
+            {t("infakt.orderWidget.linkInvoiceDialog.action", "Link")}
           </Prompt.Action>
         </Prompt.Footer>
       </Prompt.Content>
@@ -549,33 +630,44 @@ const ClearButton = ({
   row: InfaktInvoiceRow;
   busy: boolean;
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
-}) => (
-  <Prompt variant="danger">
-    <Prompt.Trigger asChild>
-      <Button disabled={busy} size="small" variant="danger">
-        No invoice in inFakt
-      </Button>
-    </Prompt.Trigger>
-    <Prompt.Content>
-      <Prompt.Header>
-        <Prompt.Title>Allow the invoice to be created again?</Prompt.Title>
-        <Prompt.Description>
-          Only confirm this if you have checked inFakt and there is <strong>no</strong> invoice for
-          this order. If one exists, this will issue a second one, and undoing that needs a formal
-          corrective invoice.
-        </Prompt.Description>
-      </Prompt.Header>
-      <Prompt.Footer>
-        <Prompt.Cancel>Cancel</Prompt.Cancel>
-        <Prompt.Action
-          onClick={() => void onAct(row.id, { action: "clear", confirm_no_duplicate: true })}
-        >
-          I checked - there is no invoice
-        </Prompt.Action>
-      </Prompt.Footer>
-    </Prompt.Content>
-  </Prompt>
-);
+}) => {
+  const { t } = useTranslation();
+  return (
+    <Prompt variant="danger">
+      <Prompt.Trigger asChild>
+        <Button disabled={busy} size="small" variant="danger">
+          {t("infakt.orderWidget.clearButton", "No invoice in inFakt")}
+        </Button>
+      </Prompt.Trigger>
+      <Prompt.Content>
+        <Prompt.Header>
+          <Prompt.Title>
+            {t("infakt.orderWidget.clearDialog.title", "Allow the invoice to be created again?")}
+          </Prompt.Title>
+          <Prompt.Description>
+            {t(
+              "infakt.orderWidget.clearDialog.descriptionBeforeStrong",
+              "Only confirm this if you have checked inFakt and there is",
+            )}{" "}
+            <strong>{t("infakt.orderWidget.clearDialog.descriptionStrong", "no")}</strong>{" "}
+            {t(
+              "infakt.orderWidget.clearDialog.descriptionAfterStrong",
+              "invoice for this order. If one exists, this will issue a second one, and undoing that needs a formal corrective invoice.",
+            )}
+          </Prompt.Description>
+        </Prompt.Header>
+        <Prompt.Footer>
+          <Prompt.Cancel>{t("infakt.common.cancel", "Cancel")}</Prompt.Cancel>
+          <Prompt.Action
+            onClick={() => void onAct(row.id, { action: "clear", confirm_no_duplicate: true })}
+          >
+            {t("infakt.orderWidget.clearDialog.action", "I checked - there is no invoice")}
+          </Prompt.Action>
+        </Prompt.Footer>
+      </Prompt.Content>
+    </Prompt>
+  );
+};
 
 const SkipButton = ({
   row,
@@ -586,33 +678,39 @@ const SkipButton = ({
   busy: boolean;
   onAct: (id: string, body: Record<string, unknown>) => Promise<void>;
 }) => {
+  const { t } = useTranslation();
   const [reason, setReason] = useState("");
   return (
     <Prompt>
       <Prompt.Trigger asChild>
         <Button disabled={busy} size="small" variant="transparent">
-          Skip
+          {t("infakt.orderWidget.skipButton", "Skip")}
         </Button>
       </Prompt.Trigger>
       <Prompt.Content>
         <Prompt.Header>
-          <Prompt.Title>Do not invoice this order</Prompt.Title>
+          <Prompt.Title>{t("infakt.orderWidget.skipDialog.title", "Do not invoice this order")}</Prompt.Title>
           <Prompt.Description>
-            A reason is required and is kept on the record - skipping is a decision not to issue a
-            document you may be required to issue.
+            {t(
+              "infakt.orderWidget.skipDialog.description",
+              "A reason is required and is kept on the record - skipping is a decision not to issue a document you may be required to issue.",
+            )}
           </Prompt.Description>
         </Prompt.Header>
         <div className="px-6 pb-4">
           <Textarea
             onChange={(event) => setReason(event.target.value)}
-            placeholder="e.g. test order, invoiced manually outside Medusa, duplicate of order ..."
+            placeholder={t(
+              "infakt.orderWidget.skipDialog.reasonPlaceholder",
+              "e.g. test order, invoiced manually outside Medusa, duplicate of order ...",
+            )}
             value={reason}
           />
         </div>
         <Prompt.Footer>
-          <Prompt.Cancel>Cancel</Prompt.Cancel>
+          <Prompt.Cancel>{t("infakt.common.cancel", "Cancel")}</Prompt.Cancel>
           <Prompt.Action onClick={() => void onAct(row.id, { action: "skip", reason })}>
-            Skip
+            {t("infakt.orderWidget.skipDialog.action", "Skip")}
           </Prompt.Action>
         </Prompt.Footer>
       </Prompt.Content>

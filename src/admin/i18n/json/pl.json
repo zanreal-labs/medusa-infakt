@@ -1,0 +1,169 @@
+{
+  "infakt": {
+    "common": {
+      "cancel": "Anuluj",
+      "yes": "tak",
+      "no": "nie"
+    },
+    "orderWidget": {
+      "heading": "Fakturowanie",
+      "dismiss": "Zamknij",
+      "loading": "Wczytywanie statusu fakturowania...",
+      "actionDone": "Gotowe.",
+      "queued": "Dodano do kolejki.",
+      "loadError": "Nie udało się wczytać statusu fakturowania dla tego zamówienia.",
+      "actionRefused": "Operacja została odrzucona.",
+      "enqueueError": "Nie udało się dodać tego zamówienia do kolejki fakturowania.",
+      "status": {
+        "done": "Wystawiona",
+        "needsReview": "Do weryfikacji",
+        "pending": "Oczekuje",
+        "processing": "Oczekuje",
+        "skipped": "Pominięta"
+      },
+      "inactive": {
+        "envForceDisabled": "Fakturowanie jest wyłączone na stałe zmienną środowiskową INFAKT_INVOICING_DISABLED.",
+        "noApiKey": "Fakturowanie jest wyłączone: w pluginie nie skonfigurowano klucza apiKey.",
+        "paused": "Fakturowanie jest wstrzymane.",
+        "default": "Fakturowanie jest obecnie wyłączone."
+      },
+      "notQueuedInactive": "To zamówienie nie zostało dodane do kolejki fakturowania.",
+      "notQueuedActive": "Dla tego zamówienia nie wystawiono jeszcze faktury. To normalne przy zamówieniu sprzed instalacji pluginu albo gdy zdarzenie wyzwalające zostało pominięte.",
+      "queueButton": "Dodaj do kolejki fakturowania",
+      "ksef": {
+        "notTracked": "poza ewidencją tego pluginu",
+        "pending": "oczekuje",
+        "notApplicable": "nie dotyczy"
+      },
+      "fields": {
+        "invoiceNumber": "Numer faktury",
+        "ksef": "KSeF",
+        "buyer": "Nabywca",
+        "skippedOn": "Pominięto",
+        "issuedOn": "Wystawiono"
+      },
+      "crashWindowDetail": "Poprzednia próba wystawienia mogła dotrzeć do inFakt. Sprawdź, czy nie powstała tam osierocona faktura, a następnie powiąż ją lub wyczyść ten zapis.",
+      "issuedNumberPending": "wystawiona (numer w trakcie nadawania)",
+      "buyerCompany": "firma (B2B)",
+      "buyerConsumer": "konsument",
+      "adoptedSuffix": "(przyjęta/zaimportowana)",
+      "attemptLabel": "próba nr",
+      "viewPdf": "Podgląd PDF",
+      "pdfOpenError": "Nie udało się otworzyć podglądu faktury.",
+      "pdfFetchError": "Nie udało się pobrać pliku PDF (HTTP {{status}}).",
+      "retry": "Ponów",
+      "linkInvoiceButton": "Powiąż fakturę",
+      "linkInvoiceDialog": {
+        "title": "Powiąż istniejącą fakturę z inFakt",
+        "description": "Znajdź fakturę dla tego zamówienia w inFakt i wklej jej UUID. To zamówienie przejmie tę fakturę - nowa nie zostanie wystawiona.",
+        "action": "Powiąż"
+      },
+      "clearButton": "Brak faktury w inFakt",
+      "clearDialog": {
+        "title": "Zezwolić na ponowne wystawienie faktury?",
+        "descriptionBeforeStrong": "Potwierdź to tylko, jeśli sprawdziłeś/aś w inFakt, że dla tego zamówienia",
+        "descriptionStrong": "nie ma",
+        "descriptionAfterStrong": "faktury. Jeśli jednak faktura istnieje, ten krok wystawi drugą, a cofnięcie tego wymaga formalnej faktury korygującej.",
+        "action": "Sprawdziłem/am - faktury nie ma"
+      },
+      "skipButton": "Pomiń",
+      "skipDialog": {
+        "title": "Nie fakturuj tego zamówienia",
+        "description": "Podanie powodu jest wymagane i zostaje zapisane na koncie - pominięcie to świadoma decyzja o niewystawieniu dokumentu, który możesz mieć obowiązek wystawić.",
+        "reasonPlaceholder": "np. zamówienie testowe, faktura wystawiona ręcznie poza Medusa, duplikat zamówienia ...",
+        "action": "Pomiń"
+      }
+    },
+    "reconcile": {
+      "heading": "Przyjmij istniejące faktury",
+      "description": "Wyszukuje faktury, które już istnieją w inFakt dla zamówień nieujętych jeszcze w ewidencji tego pluginu, i dopasowuje je wyłącznie na podstawie danych zamówienia - daty wystawienia, nabywcy i kwoty brutto. Nie wystawia żadnej faktury i niczego nie wysyła do KSeF. Zamówienia, które mają już zapisaną fakturę, pozostają bez zmian.",
+      "fromLabel": "Zamówienia złożone od",
+      "toLabel": "do",
+      "toleranceLabel": "Tolerancja daty wystawienia (dni)",
+      "preview": "Podgląd",
+      "working": "Przetwarzanie...",
+      "adoptAllMatched": "Przyjmij wszystkie dopasowane ({{count}})",
+      "previewSummary": "Liczba dopasowanych zamówień: {{adopt}} z {{scanned}} sprawdzonych.",
+      "previewError": "Nie udało się wczytać raportu uzgodnienia.",
+      "adoptedOne": "Przyjęto 1 fakturę.",
+      "adoptedMany": "Liczba przyjętych faktur: {{count}}.",
+      "adoptError": "Nie udało się przyjąć wybranych faktur.",
+      "refusedWarning": "Liczba nieprzyjętych zamówień: {{count}} - w trakcie ponownej weryfikacji na serwerze dopasowanie przestało być aktualne.",
+      "reportSummary": "Sprawdzone zamówienia bez faktury: {{scanned}}. Porównane z fakturami w inFakt: {{considered}}. Dopasowane: {{adopt}}, do ręcznej weryfikacji: {{ambiguous}}, bez dopasowania: {{noMatch}}.",
+      "truncatedWarning": "Zakres dat objął więcej zamówień lub faktur, niż jeden przebieg jest w stanie odczytać. Zawęź daty i uruchom ponownie, w przeciwnym razie część zamówień w ogóle nie zostanie sprawdzona.",
+      "skippedWarning": "Pominięte zamówienia (miały już zapisaną fakturę): {{count}}.",
+      "nothingToAdopt": "Każde zamówienie w tym zakresie ma już zapisaną fakturę. Nie ma nic do przyjęcia.",
+      "columns": {
+        "order": "Zamówienie",
+        "result": "Wynik",
+        "invoice": "Faktura",
+        "evidence": "Uzasadnienie"
+      },
+      "decision": {
+        "adopt": "Dopasowano",
+        "ambiguous": "Do weryfikacji",
+        "noMatch": "Nie znaleziono faktury"
+      },
+      "adoptOne": "Przyjmij"
+    },
+    "settings": {
+      "subtitle": "Fakturowanie opłaconych zamówień zgodnie z polskimi przepisami.",
+      "statusNeedsAttention": "wymaga uwagi",
+      "statusActive": "aktywne",
+      "ksefUnhealthyAlert": "Konto inFakt nie ma aktywnej integracji z KSeF, więc faktur B2B nie można wysłać. Napraw to w inFakt, a następnie sprawdź ponownie tutaj.",
+      "recheckKsef": "Sprawdź KSeF ponownie",
+      "checking": "Sprawdzanie...",
+      "invoicingHeading": "Fakturowanie",
+      "invoicingEnabledLabel": "Fakturowanie włączone",
+      "envForceNotice": "wyłącza fakturowanie na stałe, niezależnie od tego przełącznika. Usuń tę zmienną, aby przełącznik znów decydował.",
+      "configHeading": "Konfiguracja",
+      "configDescription": "Zmiany tutaj obowiązują od razu, od kolejnego zamówienia - bez ponownego wdrożenia i restartu aplikacji. Pole pozostawione bez zmian nie zapisuje się ponownie - nadal korzysta z ustawień wprowadzonych przy instalacji pluginu.",
+      "currencyLabel": "Waluta",
+      "environmentLabel": "Środowisko",
+      "environmentProduction": "Produkcyjne",
+      "environmentSandbox": "Testowe (sandbox)",
+      "triggerEventLabel": "Fakturuj zamówienia przy zdarzeniu",
+      "triggerEventPaymentCaptured": "dodaj do kolejki po zaksięgowaniu płatności",
+      "triggerEventOrderPlaced": "dodaj do kolejki od razu po złożeniu zamówienia",
+      "ksefModeLabel": "Wysyłka do KSeF",
+      "ksefModeNipOnly": "Tylko z NIP - faktury B2B, obowiązkowe w Polsce od kwietnia 2026",
+      "ksefModeAll": "Wszystkie faktury, także dla konsumentów",
+      "ksefModeNever": "Nigdy - wyłącznie do celów deweloperskich, narusza obowiązek wysyłki do KSeF",
+      "apiKeyLabel": "Klucz API",
+      "apiKeyWriteOnly": "Wcześniej zapisany klucz nigdy nie jest tu ponownie wyświetlany - widać jedynie, czy jest skonfigurowany.",
+      "configured": "skonfigurowany",
+      "notConfigured": "nieskonfigurowany",
+      "apiKeyPlaceholderReplace": "Wpisz nowy klucz, aby zastąpić zapisany",
+      "apiKeyPlaceholderNew": "Wpisz klucz, który zastąpi ten z instalacji",
+      "clearOverride": "Usuń nadpisanie",
+      "saveConfig": "Zapisz konfigurację",
+      "saving": "Zapisywanie...",
+      "pausedToast": "Fakturowanie wstrzymane.",
+      "resumedToast": "Fakturowanie wznowione.",
+      "pauseError": "Nie udało się zmienić przełącznika wstrzymania.",
+      "configSaved": "Konfiguracja zapisana.",
+      "configSaveError": "Nie udało się zapisać konfiguracji.",
+      "apiKeyCleared": "Zapisany klucz API usunięty. Plugin wraca do klucza podanego przy instalacji, jeśli taki istnieje.",
+      "apiKeyClearError": "Nie udało się usunąć nadpisania klucza API.",
+      "ksefActive": "Integracja z KSeF jest aktywna.",
+      "ksefInactive": "Integracja z KSeF nie jest aktywna.",
+      "ksefCheckError": "Nie udało się ponownie sprawdzić integracji z KSeF.",
+      "loadError": "Nie udało się wczytać konfiguracji inFakt.",
+      "inactive": {
+        "envForceDisabled": "Fakturowanie jest wyłączone na stałe zmienną środowiskową INFAKT_INVOICING_DISABLED.",
+        "noApiKey": "Żadne zamówienie nie zostanie zafakturowane: brak klucza API inFakt, ani tu, ani przy instalacji.",
+        "paused": "Fakturowanie jest wstrzymane. Żadne zamówienie nie zostanie zafakturowane, dopóki nie zostanie wznowione.",
+        "default": "Fakturowanie jest obecnie wyłączone."
+      },
+      "fields": {
+        "invoicingFrom": "Fakturowanie zamówień od",
+        "vatSymbol": "Symbol stawki VAT",
+        "ksefVerifiedAtStartup": "KSeF zweryfikowany przy starcie",
+        "emitsEvent": "Emituje infakt.invoice.issued",
+        "needsReview": "Do weryfikacji",
+        "issued": "Wystawione"
+      },
+      "noDateFloor": "brak dolnej granicy daty"
+    }
+  }
+}
