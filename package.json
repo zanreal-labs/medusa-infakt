@@ -24,6 +24,10 @@
     "type": "git",
     "url": "git+https://github.com/zanreal-labs/medusa-infakt.git"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "files": [
     ".medusa/server"
   ],
