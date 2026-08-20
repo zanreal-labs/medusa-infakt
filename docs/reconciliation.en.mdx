@@ -1,0 +1,136 @@
+---
+title: Reconciliation and adoption
+description: Matching invoices that already exist in inFakt to the orders they belong to - the three hard gates, why line names are never a signal, the confidence grades, and the dry run that comes first.
+---
+
+Some orders have an invoice in inFakt and no record of it here. Two situations
+produce that:
+
+1. **The crash window.** The create POST reached inFakt and the process died
+   before the task reference landed. The row is parked in `needs_review`
+   precisely so a human decides, and this engine tells them *which* invoice to
+   adopt.
+2. **A store with history.** Invoices issued before this plugin was installed, or
+   by another system during a migration.
+
+inFakt is the only source consulted. No legacy system is read, and nothing here
+knows one ever existed.
+
+## Three gates, all hard
+
+Every gate is a requirement. A candidate failing any one is out; there is no
+score trading one signal off against another.
+
+1. **Date window.** The invoice date must sit within `dateToleranceDays` calendar
+   days of the order's Warsaw calendar day. Default **7**, maximum **31** -
+   beyond a month the date stops gating anything. An invoice with no date cannot
+   clear this and is dropped. This is the gate that stops a repeat customer's
+   later order from matching an earlier invoice for the same basket.
+2. **Buyer identity.** A B2B order (a NIP on the order) requires an exact
+   normalized NIP match. A B2C order requires an exact email match **or** an
+   exact normalized full-name match.
+3. **Gross total.** Integer equality, grosz for grosz, no tolerance, with the
+   currency agreeing when both sides state one.
+
+Normalization does the obvious work so legitimate variation does not cause a
+miss. A NIP is reduced to digits, so `123-456-32-18` and `PL1234563218` converge
+on what inFakt stores. Names are lowercased, trimmed, whitespace-collapsed, and
+stripped of diacritics - with `ł` mapped explicitly first, because it is a
+distinct letter that does not decompose under NFKD.
+
+An order whose gross total cannot be read is `null`, never `0`. Zero is a real
+amount that a zero-value invoice would match, and every other amount would read
+as a confident no-match against a number nobody ever charged. A null loses every
+candidate at the amount gate, which is the only safe answer.
+
+## Why line names are never a signal
+
+Not as a gate, not as a confidence grade, not as a tiebreak.
+
+The two systems name a line for their own reasons. One writes the catalogue
+title, another a shortened trade name, an aggregate like "Towar", or whatever the
+seller typed. Those names differ for perfectly legitimate documents.
+
+Grading on them produced exactly one visible effect in production: correct
+matches were reported as weaker than they were, which is noise an operator then
+has to learn to ignore. A signal that is wrong for legitimate data is worse than
+no signal, so there is none.
+
+## Unambiguous, or chronological, or nothing
+
+A unique survivor is adopted. Several survivors are **ambiguous** and reported
+for a human - never narrowed by picking the prettiest candidate.
+
+There is one exception, for the case a nearest-date rule could never settle
+honestly: the same buyer placing several orders on one day for the same amount,
+invoiced with several equally identical documents. Nothing but chronology
+separates them, so the orders are sorted by when they were placed, the invoices
+by their number within their shared issue date, and the two are paired off one to
+one.
+
+That pairing engages **only** when the two sides are mutually indistinguishable
+*and* equal in number. An odd count, a differing issue date, an unreadable number
+series, or an invoice another order also wants refuses the whole group and says
+why per order. Two orders resolving to the same invoice both become ambiguous:
+one document cannot settle two orders.
+
+## The declared invoice number
+
+If the order itself names an invoice number in
+`order.metadata.invoice_number` - the same key the pipeline's already-invoiced
+guard reads - that is treated as a **hard gate**, not a hint. The matched invoice
+must *be* that one. An order that names an invoice and matches a different one by
+amount and buyer is not a discovery, it is a warning.
+
+## Confidence grades
+
+Every adoption is graded `high` or `medium`. The grade is about how strongly the
+document is tied to the order, and it decides what an operator needs to look at.
+
+| Situation | Grade |
+| --- | --- |
+| The order named the invoice number itself, and the document matches on buyer, amount and date | `high` |
+| Matched on NIP or email, same day or one day apart | `high` |
+| Matched on **full name** only | `medium` |
+| Buyer and amount exact, but the invoice is more than one day from the order | `medium` |
+| Told apart from same-day duplicates by chronology alone | `medium` |
+
+A NIP and an email are keys: two different buyers do not share them. A full name
+is not - it is thousands of people, and a name-only match plus a same-day,
+same-amount coincidence is precisely the near-miss a human catches and a rule
+cannot. A chronologically tie-broken match is correct only if duplicate orders
+were invoiced in the order they were placed, which is a sound default and a bad
+thing to auto-apply unseen.
+
+One fact is recorded as evidence but deliberately does **not** grade: how many
+invoices were in the date window. That measures how busy the window was, not how
+good this match is. Candidates that lost on identity or amount lost on a hard
+gate, and letting their number darken a survivor would mark every match in a busy
+week as weaker than the same match in a quiet one.
+
+## Evidence carries kinds, not values
+
+What is persisted on the ledger row is signal *kinds* and numbers only:
+`identity: "email"`, never the email itself. The invoice table holds no buyer
+data, and an audit trail is not a reason to start.
+
+## Dry run first
+
+```http
+GET  /admin/infakt/reconcile?from=2026-07-01&to=2026-08-12
+POST /admin/infakt/reconcile   { from, to, tolerance_days?, apply?, order_ids? }
+```
+
+`GET` is always a dry run. `POST` is a dry run too **unless** you pass
+`apply: true`, and `order_ids` narrows an apply to the specific orders you have
+reviewed. The intended flow is: run the report, read the decisions and their
+reasons, then apply the subset you accept.
+
+Adoption records a document that already exists. **No invoice is created, none is
+filed to KSeF, and no `infakt.invoice.issued` event is emitted.** An adopted row
+is marked with `adopted_at` and its evidence, and the admin labels it as adopted
+rather than issued.
+
+The matching engine itself is pure - no I/O, no Medusa imports, no clock beyond
+the dates it is handed - so every rule on this page is unit-testable in
+isolation.

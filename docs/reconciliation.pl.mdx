@@ -1,0 +1,144 @@
+---
+title: Uzgadnianie i przejmowanie faktur
+description: "Dopasowywanie dokumentów, które już są w inFakcie, do właściwych zamówień: trzy twarde bramki, dlaczego nazwy pozycji nigdy nie są sygnałem, oceny pewności i obowiązkowy przebieg próbny."
+---
+
+Bywa, że zamówienie ma fakturę w inFakcie, a rejestr tej wtyczki nic o niej nie
+wie. Prowadzą do tego dwie sytuacje:
+
+1. **Okno awarii.** Wywołanie tworzące fakturę doszło do inFaktu, a proces padł,
+   zanim wrócił identyfikator zadania. Wiersz czeka w `needs_review` właśnie po
+   to, żeby zdecydował człowiek, a ten mechanizm podpowiada mu, *którą* fakturę
+   przejąć.
+2. **Sklep z historią.** Dokumenty wystawione, zanim ta wtyczka w ogóle
+   istniała, albo przez inny system w trakcie migracji.
+
+Jedynym źródłem jest inFakt. Żaden stary system nie jest odczytywany i nic tutaj
+nie wie, że kiedykolwiek istniał.
+
+## Trzy bramki i wszystkie twarde
+
+Każda bramka to wymóg. Kandydat, który przepadnie na którejkolwiek, odpada. Nie
+ma punktacji pozwalającej nadrobić jeden sygnał drugim.
+
+1. **Okno dat.** Data wystawienia musi mieścić się w `dateToleranceDays` dniach
+   kalendarzowych od warszawskiego dnia zamówienia. Domyślnie **7**, maksymalnie
+   **31**, bo powyżej miesiąca data przestaje cokolwiek odsiewać. Faktura bez
+   daty nie przejdzie tej bramki i odpada. To ta bramka nie pozwala, żeby
+   późniejsze zamówienie stałego klienta dopasowało się do wcześniejszej faktury
+   za ten sam koszyk.
+2. **Tożsamość nabywcy.** Zamówienie B2B, czyli z NIP-em, wymaga dokładnej
+   zgodności znormalizowanego NIP-u. Zamówienie konsumenckie wymaga dokładnej
+   zgodności adresu e-mail **albo** znormalizowanego imienia i nazwiska.
+3. **Kwota brutto.** Równość liczb całkowitych, co do grosza, bez tolerancji, z
+   walutą zgodną wtedy, gdy podają ją obie strony.
+
+Normalizacja robi oczywistą robotę, żeby uprawniona różnica w zapisie nie
+zgubiła dopasowania. NIP sprowadza się do samych cyfr, więc `123-456-32-18` i
+`PL1234563218` schodzą się do postaci, którą trzyma inFakt. Nazwiska idą do
+małych liter, bez zbędnych spacji i bez znaków diakrytycznych, przy czym `ł`
+mapowane jest osobno i wcześniej, bo to odrębna litera, która nie rozkłada się w
+NFKD.
+
+Zamówienie, którego kwoty brutto nie da się odczytać, dostaje `null`, nigdy `0`.
+Zero jest prawdziwą kwotą, do której dopasowałaby się faktura zerowa, a każda
+inna kwota czytałaby się jako pewne niedopasowanie wobec liczby, której nikt
+nigdy nie policzył. `null` gubi wszystkich kandydatów na bramce kwoty i to
+jedyna bezpieczna odpowiedź.
+
+## Dlaczego nazwy pozycji nigdy nie są sygnałem
+
+Ani jako bramka, ani jako ocena pewności, ani jako rozstrzygnięcie remisu.
+
+Oba systemy nazywają pozycję po swojemu. Jeden wpisuje tytuł z katalogu, drugi
+skróconą nazwę handlową, zbiorcze „Towar" albo to, co akurat wpisał sprzedawca.
+Te nazwy różnią się dla całkowicie poprawnych dokumentów.
+
+Ocenianie po nich dało w praktyce dokładnie jeden widoczny efekt: poprawne
+dopasowania raportowały się jako słabsze, niż były, czyli szum, który operator
+musi się potem nauczyć ignorować. Sygnał błędny dla poprawnych danych jest gorszy
+niż brak sygnału, więc go nie ma.
+
+## Jednoznacznie, chronologicznie albo wcale
+
+Jedyny ocalały kandydat zostaje przejęty. Kilku ocalałych to wynik
+**niejednoznaczny**, zgłaszany człowiekowi, a nie zawężany przez wybranie
+ładniejszego kandydata.
+
+Jest jeden wyjątek, dla przypadku, którego reguła najbliższej daty nigdy nie
+rozstrzygnęłaby uczciwie: ten sam nabywca składa kilka zamówień jednego dnia na tę
+samą kwotę i dostaje kilka równie identycznych dokumentów. Nie różni ich nic poza
+chronologią, więc zamówienia porządkuje się według momentu złożenia, faktury
+według ich numeru w obrębie wspólnej daty wystawienia, i łączy jedno do jednego.
+
+To parowanie włącza się **wyłącznie** wtedy, gdy obie strony są wzajemnie
+nieodróżnialne *i* równoliczne. Nieparzysta liczba, inna data wystawienia,
+nieczytelna seria numeracji albo faktura, której chce też inne zamówienie,
+odrzucają całą grupę i podają powód przy każdym zamówieniu osobno. Dwa zamówienia
+wskazujące tę samą fakturę stają się oba niejednoznaczne, bo jeden dokument nie
+rozstrzygnie dwóch zamówień.
+
+## Numer zadeklarowany przez zamówienie
+
+Jeśli samo zamówienie podaje numer faktury w `order.metadata.invoice_number`,
+czyli pod tym samym kluczem, który czyta bramka „już zafakturowane", jest to
+traktowane jak **twarda bramka**, a nie podpowiedź. Dopasowana faktura musi *być*
+tą właśnie. Zamówienie, które wskazuje jedną fakturę, a kwotą i nabywcą pasuje do
+innej, to nie odkrycie, tylko ostrzeżenie.
+
+## Oceny pewności
+
+Każde przejęcie dostaje ocenę `high` albo `medium`. Ocena mówi o tym, jak mocno
+dokument jest związany z zamówieniem, i decyduje, czemu operator musi się
+przyjrzeć.
+
+| Sytuacja | Ocena |
+| --- | --- |
+| Zamówienie samo podało numer, a dokument zgadza się nabywcą, kwotą i datą | `high` |
+| Dopasowanie po NIP-ie albo e-mailu, ten sam dzień lub różnica jednego dnia | `high` |
+| Dopasowanie wyłącznie po **imieniu i nazwisku** | `medium` |
+| Nabywca i kwota dokładne, ale faktura oddalona o więcej niż dzień | `medium` |
+| Rozróżnione spośród duplikatów z jednego dnia wyłącznie chronologią | `medium` |
+
+NIP i adres e-mail są kluczami: dwóch różnych nabywców ich nie dzieli. Imię i
+nazwisko kluczem nie jest, bo nosi je mnóstwo osób, a dopasowanie po samym
+nazwisku w połączeniu ze zbieżnością dnia i kwoty to dokładnie ten bliski
+fałszywy trop, który człowiek wyłapie, a reguła nie. Dopasowanie rozstrzygnięte
+chronologią jest poprawne tylko wtedy, gdy trzyma się założenie, że duplikaty
+fakturowano w kolejności składania, a to dobry domyślny wybór i zła rzecz do
+stosowania automatycznie bez spojrzenia.
+
+Jeden fakt zapisuje się jako dowód, ale świadomie **nie** wpływa na ocenę: ile
+faktur było w oknie dat. To miara tego, jak ruchliwe było okno, a nie jak dobre
+jest dopasowanie. Kandydaci, którzy odpadli na tożsamości albo kwocie, odpadli na
+twardej bramce, a pozwolenie, by ich liczba przyciemniała ocalałego, oznaczałoby
+oznaczanie każdego dopasowania w ruchliwym tygodniu jako słabszego niż to samo
+dopasowanie w spokojnym.
+
+## Dowód niesie rodzaje sygnałów, nie wartości
+
+W wierszu rejestru zapisują się wyłącznie *rodzaje* sygnałów i liczby:
+`identity: "email"`, nigdy sam adres. Tabela faktur nie trzyma danych nabywcy, a
+ślad audytowy nie jest powodem, żeby zacząć.
+
+## Najpierw przebieg próbny
+
+```http
+GET  /admin/infakt/reconcile?from=2026-03-01&to=2026-03-31
+POST /admin/infakt/reconcile   { from, to, tolerance_days?, apply?, order_ids? }
+```
+
+`GET` jest zawsze przebiegiem próbnym. `POST` również, **chyba że** podasz
+`apply: true`, a `order_ids` zawęża zastosowanie do konkretnych zamówień, które
+przejrzałeś. Zamierzony przebieg pracy jest taki: uruchom raport, przeczytaj
+rozstrzygnięcia wraz z uzasadnieniami, a potem zastosuj tę część, którą
+akceptujesz.
+
+Przejęcie zapisuje dokument, który już istnieje. **Nic nie jest tworzone, nic nie
+idzie do KSeF i nie powstaje zdarzenie `infakt.invoice.issued`.** Przejęty wiersz
+dostaje `adopted_at` wraz z dowodem, a panel oznacza go jako przejęty, nie
+wystawiony.
+
+Sam mechanizm dopasowania jest czysty: bez I/O, bez importów z Medusy i bez
+zegara poza datami, które dostaje. Dzięki temu każdą regułę z tej strony da się
+przetestować w izolacji.

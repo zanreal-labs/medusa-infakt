@@ -1,0 +1,151 @@
+---
+title: Overview
+description: Polish invoicing for Medusa v2 - issues inFakt invoices for paid orders, files the B2B ones to KSeF, and parks anything ambiguous for a human instead of guessing.
+---
+
+`@zanreal/medusa-infakt` issues real fiscal documents. That one sentence explains
+every design decision on these pages.
+
+It watches for paid orders, builds an invoice, creates it in
+[inFakt](https://www.infakt.pl/), files it to KSeF when Polish law requires it,
+and records the result in its own ledger. When something does not add up, it
+stops and asks, because the alternative is a numbered document in the national
+e-invoicing system that should not exist.
+
+## Why the cautious design
+
+An invoice is not a row you can quietly fix later. It carries a sequential
+number, it is reported to the tax authority, and it is sent to a customer. Two
+consequences run through the whole plugin:
+
+**inFakt's create endpoint has no idempotency key.** A retried POST issues a
+second real, numbered invoice. So the plugin writes `submit_started_at` *before*
+it calls, and if it wakes up to find that column set with no task reference, it
+refuses to retry and parks the row for a human. That is the single failure mode
+this design will not automate away. See [The invoicing
+pipeline](./invoicing.en.mdx).
+
+**A wrong pairing is worse than no pairing.** When adopting invoices that already
+exist in inFakt, every check is hard equality: the buyer, the day, and the gross
+total to the grosz. Several candidates means ambiguous, and ambiguous is never
+auto-applied. See [Reconciliation and adoption](./reconciliation.en.mdx).
+
+## The shape of one invoice
+
+```text
+  payment.captured  ->  subscriber enqueues a row (status: pending)
+                             |
+                             v
+   worker tick (every 5 min, INFAKT_WORKER_CRON)
+                             |
+                    gates: already invoiced? before startDate?
+                           wrong currency? canceled? fully paid?
+                             |
+                             v
+                    create invoice in inFakt        <- submit_started_at written FIRST
+                             |
+                    fetch the assigned number
+                             |
+                    file to KSeF (if required)      <- see the KSeF page
+                             |
+                    emit infakt.invoice.issued
+                             |
+                             v
+                          done
+```
+
+Each external call persists its result before the next one starts, and the next
+step is derived purely from which columns are still null. There is no in-memory
+progress and no step counter, so a crash at any instant resumes exactly where it
+stopped on the next tick.
+
+Four terminal-ish states matter: `done`, `skipped` (deliberately not invoiced,
+with a reason), `needs_review` (a human decides), and `pending`/`processing` in
+between.
+
+## Install
+
+This package is not on npm yet. It installs as a git dependency, pinned to a
+commit:
+
+```jsonc title="package.json"
+{
+  "dependencies": {
+    "@zanreal/medusa-infakt": "github:zanreal-labs/medusa-infakt#1c7a50c551f59658156d6f0b024996946cd71417"
+  }
+}
+```
+
+Pin the commit you tested against. There is no published tag, so `#main` would
+move under you on the next push; a pinned commit means the same thing tomorrow
+that it means today.
+
+The package builds itself on install: `prepare` runs `medusa plugin:build`,
+which turns the checked-out source into the `.medusa/server` output its
+`exports` point at. pnpm 10 and newer will not run that script for a dependency
+they do not already trust, so allow it once in your own workspace file:
+
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  "@zanreal/medusa-infakt@https://codeload.github.com/zanreal-labs/medusa-infakt/tar.gz/1c7a50c551f59658156d6f0b024996946cd71417": true
+```
+
+The key is the exact tarball URL pnpm resolves the pinned commit to, which is why
+it repeats the SHA from the dependency line. Move the pin and you move both.
+
+Then register the plugin:
+
+```ts title="medusa-config.ts"
+import { defineConfig, loadEnv } from "@medusajs/framework/utils";
+
+loadEnv(process.env.NODE_ENV || "development", process.cwd());
+
+module.exports = defineConfig({
+  plugins: [
+    {
+      resolve: "@zanreal/medusa-infakt",
+      options: {
+        apiKey: process.env.INFAKT_API_KEY,
+        settingsEncryptionKey: process.env.INFAKT_SETTINGS_KEY,
+      },
+    },
+  ],
+});
+```
+
+Then run the migrations it ships:
+
+```bash
+npx medusa db:migrate
+```
+
+## Two switches, both off by default
+
+Installing the plugin does not start invoicing, and that is deliberate.
+
+**`apiKey` is the on/off switch.** Leave it unset and the plugin boots inert:
+nothing is enqueued, nothing is invoiced, and the boot log says so once. There is
+no separate `enabled` flag - unwiring the credential is the supported way to turn
+this integration off.
+
+**`invoicing_paused` defaults to `true`.** Even with `apiKey` configured, a fresh
+install issues nothing until an operator unpauses it from the Settings page. A
+store cutting over from a legacy invoicing system needs the credential present on
+day one for the admin UI and the KSeF health check to work, while invoicing must
+stay off. A config edit plus a redeploy is too slow and too easy to forget for a
+decision that matters this much.
+
+There is also `INFAKT_INVOICING_DISABLED`, an environment-level emergency brake
+that overrides both and cannot be released from inside the admin. All three are
+described in [Settings and the admin API](./settings.en.mdx).
+
+## Where to go next
+
+- [The invoicing pipeline](./invoicing.en.mdx) - the trigger, the gates, the
+  state machine, and what a retry does.
+- [KSeF filing](./ksef.en.mdx) - who gets filed, why the default is not a
+  boolean, and what a rejection does.
+- [Reconciliation and adoption](./reconciliation.en.mdx) - matching invoices that
+  already exist in inFakt to the orders they belong to.
+- [Settings and the admin API](./settings.en.mdx) - every option, every override,
+  every route.

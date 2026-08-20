@@ -1,0 +1,163 @@
+---
+title: Potok fakturowania
+description: "Od zdarzenia do gotowej faktury: bramka pełnej zapłaty, pięć powodów pominięcia, trwała maszyna stanów, okno awarii, którego nikt nie ponawia, i jak działa backoff."
+---
+
+Zdarzenie startowe tylko dopisuje wiersz do kolejki. Wszystko, co decyduje, czy
+faktura naprawdę powstanie, dzieje się później, w workerze, który przy każdym
+tiku czyta zamówienie na nowo.
+
+Ten podział jest sednem. `payment.captured` odpala się raz na każde pobranie
+płatności, a zamówienie można pobrać w częściach. Fakturowanie przy pierwszym
+pobraniu wystawiłoby dokument na pełną kwotę zamówienia przeciwko zapłacie
+częściowej.
+
+## Od zdarzenia do zamówienia
+
+Obsługiwane są dwa zdarzenia i niosą różne dane:
+
+| Zdarzenie | Co jest w `id` | Jak dojść do zamówienia |
+| --- | --- | --- |
+| `order.placed` | zamówienie | wprost |
+| `payment.captured` (domyślne) | **płatność** | skok po grafie przez `payment_collection.order` |
+
+Domyślne jest `payment.captured`, bo Medusa nie ma zdarzenia `order.paid`, a
+faktura musi stwierdzać zapłatę, która nastąpiła. `order.placed` jest dla
+sklepów fakturujących w momencie złożenia zamówienia, na przykład B2B z
+terminem płatności, i jest bezpieczne: bramka pełnej zapłaty i tak przytrzyma
+wiersz, dopóki pieniądze nie dojdą. Zdarzenie decyduje wyłącznie o tym, kiedy
+wiersz powstaje.
+
+Płatność, dla której nie da się ustalić zamówienia, zwraca `null` zamiast rzucać
+wyjątkiem. Kolekcja płatności dla koszyka, który nigdy nie stał się zamówieniem,
+albo podpięta pod zwrot czy wymianę, to normalny i przewidziany kształt danych.
+Wyjątek sprawiłby, że Medusa ponawiałaby to zdarzenie w nieskończoność z powodu
+czegoś, co błędem nie jest.
+
+## Bramki sprawdzane przy każdym tiku
+
+Zanim ruszy jakikolwiek krok, worker czyta zamówienie na nowo i sprawdza pięć
+rzeczy. Każda kończy się wierszem `skipped` z podanym powodem, nie cichym
+zignorowaniem.
+
+1. **Zafakturowane gdzie indziej.** Jeśli `order.metadata.invoice_number` jest
+   ustawione, zamówienie zostało zafakturowane poza tym potokiem i jest
+   pomijane. Jeśli wiersz *dodatkowo* ma już `invoice_uuid` z tego potoku, to
+   konflikt, który rozstrzyga człowiek, a nie wiersz po cichu wybierający stronę.
+2. **Sprzed daty startowej.** Przy ustawionym `startDate` zamówienie złożone
+   wcześniej jest pomijane. Porównanie idzie po warszawskich dniach
+   kalendarzowych, zgodnie z tym, jak data trafia na fakturę. Porównywanie
+   surowych znaczników czasu ustawiłoby zamówienie złożone o 01:00 czasu
+   warszawskiego po niewłaściwej stronie granicy.
+3. **Zła waluta.** Zamówienie w innej walucie niż skonfigurowana jest pomijane.
+4. **Anulowane.** Anulowane przed zafakturowaniem to pominięcie. Anulowane *po*
+   wystawieniu faktury trafia do `needs_review`: faktura korygująca to dokument
+   prawny rządzący się własnymi zasadami i wtyczka nie wystawia go z własnej
+   inicjatywy.
+5. **Nieopłacone w całości.** Wiersz jest odkładany i sprawdzany ponownie za 30
+   minut. Jeśli zamówienie przestaje być opłacone *po* wystawieniu faktury, to
+   `needs_review`, a nie nieskończone czekanie na ponowną zapłatę.
+
+### Bramka pełnej zapłaty
+
+Pobrania sumują się po wszystkich kolekcjach płatności, pomniejszone o zwroty.
+Preferowane jest `captured_amount` samej kolekcji, a gdy tego agregatu brakuje,
+sumowane są jej pojedyncze płatności. Płatności anulowane są pomijane, bo
+anulowana płatność potrafi mieć niezerowe `captured_amount` sprzed anulowania.
+
+Wszystko porównuje się w **całkowitych jednostkach minorowych**. Porównywanie
+liczb dziesiętnych prosi się o klasyczne zawieszenie na
+`133.44 !== 133.44000000000001`, gdzie zamówienie jest opłacone w całości, a
+potok czeka na nie w nieskończoność.
+
+Każda domyślna wartość w tym sumowaniu przesuwa odpowiedź *od* stanu „opłacone":
+brak zwrotu naprawdę oznacza brak zwrotu, a nieczytelne pobranie liczy się jako
+zero. Najgorszy przypadek to jeszcze jeden odłożony tik, nigdy faktura wystawiona
+przeciwko zapłacie, której nie było. Jedyna wartość, która nigdy nie dostaje
+wartości domyślnej, to kwota zamówienia. Gdy jej nie da się odczytać, bramka
+odmawia wprost.
+
+## Maszyna stanów
+
+Kolejny krok wynika wyłącznie z tego, które kolumny są jeszcze puste:
+
+```text
+  invoice_uuid puste?  -> task_reference ustawione?    -> resolve-create-task
+                       -> submit_started_at ustawione? -> OKNO AWARII (odmowa)
+                       -> w przeciwnym razie           -> submit-create
+  invoice_number puste?                                -> fetch-invoice-number
+  ksef_required i brak ksef_number?                    -> ksef_sent_at ? poll-ksef : send-to-ksef
+  emitEvent i brak event_emitted_at?                   -> emit-event
+  w przeciwnym razie                                   -> complete
+```
+
+Nie ma licznika kroków ani postępu trzymanego w pamięci i właśnie to sprawia, że
+awaria w dowolnej chwili jest odwracalna. Czyste reguły siedzą w
+`src/lib/invoicing/state-machine.ts`, bez bazy i bez klienta HTTP, więc własności
+odpornościowe da się przetestować jednostkowo.
+
+## Okno awarii
+
+`submit_started_at` zapisuje się **przed** wywołaniem tworzącym fakturę. Jeśli
+worker zastanie później tę kolumnę wypełnioną bez `task_reference`, wywołanie
+mogło dojść do inFaktu i wtedy się zatrzymuje:
+
+> a previous inFakt create attempt may have gone through without a stored task
+> reference - check inFakt for a stray invoice, then adopt it with link-manually
+> or clear the row
+
+Wiersz trafia do `needs_review` i nigdy nie jest ponawiany automatycznie. Człowiek
+sprawdza inFakt i albo przejmuje zabłąkaną fakturę, albo czyści znacznik. Takie
+wiersze API rejestru oznacza polem `in_crash_window`, żeby panel mógł wyłączyć
+przycisk ponowienia, zamiast pozwalać operatorowi dowiadywać się o problemie z
+treści błędu.
+
+Automatyczne ponowienie tego jednego wywołania to sytuacja, której ta konstrukcja
+odmawia. Cała reszta jest ponawiana, bo cała reszta jest albo idempotentna, albo
+obserwowalna.
+
+## Wyniki, ponowienia i backoff
+
+Krok kończy się rzuceniem jednego z trzech sygnałów sterujących albo prawdziwym
+błędem:
+
+| Sygnał | Znaczenie | Zużywa próbę? |
+| --- | --- | --- |
+| `defer` | nie skończone, ale to nie porażka - trwa przetwarzanie albo brak zapłaty | **Nie** |
+| `review` | koniec, potrzebny człowiek | nie dotyczy |
+| `skip` | świadomie niefakturowane, z powodem | **Nie** |
+| rzucony błąd | ponowienie z backoffem | Tak |
+
+To, że `defer` nie zużywa próby, jest celowe: powolny system zewnętrzny nie może
+przepalić budżetu ponowień. Wiersz odłożony sto razy nie wydał nic.
+
+Ponowienia odsuwają się według `5 min * 2 ** próby`, z sufitem 6 godzin, więc
+pierwsze czeka już 10 minut. Awarie, które w ogóle warto ponawiać, czyli limity
+zapytań i przestoje inFaktu, nie mijają w pięć. Po **8 próbach** wiersz idzie do
+`needs_review`, bo nieskończona pętla ponowień na trwale zepsutym wierszu wygląda
+na każdym wykresie identycznie jak działający potok.
+
+Część statusów HTTP kończy sprawę od razu, bez ponawiania: **400, 403, 404, 405,
+409, 422**. 409 jest na tej liście, bo inFakt używa go w znaczeniu „to już się
+wydarzyło", czego ponowienie nie poprawi. Świadomie nie ma tam 429 ani 5xx, bo to
+dokładnie te przypadki, dla których backoff istnieje.
+
+`last_error` jest przycinane do 300 znaków i nie niesie danych osobowych nabywcy.
+Zrzut błędów walidacji z inFaktu potrafi mieć kilka kilobajtów.
+
+## Częstotliwości
+
+| Co | Odstęp |
+| --- | --- |
+| Harmonogram workera | `*/5 * * * *`, nadpisywany przez `INFAKT_WORKER_CRON` |
+| Sprawdzenie, gdy inFakt albo KSeF wciąż przetwarzają | 2 minuty |
+| Sprawdzenie, gdy zamówienie nie jest jeszcze opłacone | 30 minut |
+| Pierwsze ponowienie po błędzie | 10 minut, podwajane do sufitu 6 godzin |
+
+Harmonogram workera jest zmienną środowiskową, a nie opcją wtyczki, bo Medusa
+czyta `config.schedule` zadania cyklicznego w momencie ładowania wtyczki, zanim
+istnieje kontener i rozwiązane opcje.
+
+Po wystawieniu faktury wtyczka emituje `infakt.invoice.issued`, chyba że
+`emitIssuedEvent` ustawiono na `false`. Dzięki temu inna wtyczka może zareagować,
+na przykład dopiąć PDF do zamówienia z marketplace'u.

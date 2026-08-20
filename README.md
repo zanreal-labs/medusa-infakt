@@ -75,9 +75,33 @@ obligation applies to your business, and that your invoices are correct, remains
 
 ## Install
 
-```bash
-npm install @zanreal/medusa-infakt
+This package is not on npm yet. It installs as a git dependency, pinned to a commit:
+
+```jsonc
+// package.json
+{
+  "dependencies": {
+    "@zanreal/medusa-infakt": "github:zanreal-labs/medusa-infakt#1c7a50c551f59658156d6f0b024996946cd71417"
+  }
+}
 ```
+
+Pin to the commit you tested against. There is no published tag yet, so `#main` would move under
+you on the next push to the repository.
+
+The package compiles itself on install - `prepare` runs `medusa plugin:build`, which turns the
+checked-out source into the `.medusa/server` output its `exports` point at. pnpm 10 and newer
+refuse to run that script for a dependency they do not already trust, so a fresh install needs it
+allowed once, in your project's `pnpm-workspace.yaml`:
+
+```yaml
+# pnpm-workspace.yaml
+allowBuilds:
+  "@zanreal/medusa-infakt@https://codeload.github.com/zanreal-labs/medusa-infakt/tar.gz/1c7a50c551f59658156d6f0b024996946cd71417": true
+```
+
+The key is the exact tarball URL pnpm resolves the pinned commit to, which is why it carries the
+same SHA as the dependency line above - update both together when you move the pin.
 
 Register it in `medusa-config.ts`:
 

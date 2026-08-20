@@ -1,0 +1,206 @@
+---
+title: Ustawienia i API panelu
+description: "Komplet opcji wtyczki, nadpisania edytowalne z panelu bez redeployu, trzy wyłączniki fakturowania i opis każdej trasy administracyjnej."
+---
+
+## Opcje wtyczki
+
+Wszystko pochodzi z `medusa-config.ts`. Medusa przekazuje obiekt `options`
+wtyczki każdemu modułowi w niej zawartemu bez zmian. Sekrety trzymaj w zmiennych
+środowiskowych czytanych przez plik konfiguracyjny. Sama wtyczka nigdy nie sięga
+po poświadczenia do `process.env`, dzięki czemu projekt ma jedno miejsce, w
+którym są podpięte.
+
+| Opcja | Typ | Domyślnie | Do czego służy |
+| --- | --- | --- | --- |
+| `apiKey` | `string` | brak | Klucz API inFaktu, wysyłany jako `X-inFakt-ApiKey`. **To jest włącznik.** |
+| `environment` | `"production" \| "sandbox"` | `"production"` | Z którym inFaktem rozmawiać. |
+| `startDate` | `string` | brak | Ścisła granica `YYYY-MM-DD`. Wcześniejsze zamówienia są pomijane. |
+| `currency` | `string` | `"PLN"` | Zamówienia w innej walucie są pomijane. |
+| `taxSymbol` | `string` | `"23"` | Symbol VAT inFaktu na każdej pozycji: `"23"`, `"8"`, `"5"`, `"0"`, `"zw"`, `"np"`. |
+| `triggerEvent` | `"payment.captured" \| "order.placed"` | `"payment.captured"` | Które zdarzenie kolejkuje zamówienie. |
+| `ksef.mode` | `"nip-only" \| "all" \| "never"` | `"nip-only"` | Kto trafia do KSeF. Zobacz [Wysyłkę do KSeF](./ksef.pl.mdx). |
+| `ksef.requireActive` | `boolean` | `true` na produkcji, `false` w sandboksie | Kontrola integracji KSeF przy starcie. |
+| `ksef.decide` | funkcja | brak | Predykat na fakturę. Przebija `mode` w całości, łącznie z `never`. |
+| `nipExtractor` | funkcja | domyślnie trzy miejsca | Gdzie szukać NIP-u nabywcy. |
+| `emitIssuedEvent` | `boolean` | `true` | Emisja `infakt.invoice.issued` po wystawieniu faktury. |
+| `timeoutMs` | `number` | `60000` | Limit czasu pojedynczego wywołania inFaktu. |
+| `settingsEncryptionKey` | `string` | brak | Materiał klucza do szyfrowania nadpisanego `apiKey` w bazie. |
+
+### Dwie wartości domyślne zostawione świadomie
+
+`currency: "PLN"` i `taxSymbol: "23"` wyglądają jak zaszyte preferencje, których
+ten kod skądinąd nie toleruje. Nie są nimi.
+
+inFakt to polski serwis do fakturowania i księgowości: konto należy do polskiej
+zarejestrowanej firmy, prowadzone księgi są polskie, a walutą ewidencji jest PLN.
+Domyślna wartość inna niż PLN nie opisywałaby żadnego prawdziwego konta w
+inFakcie. Tak samo `23` nie jest stawką wybraną przez wtyczkę, tylko symbolem
+inFaktu na podstawową polską stawkę VAT, czyli wartością ze słownika
+integrowanego serwisu. Jedno i drugie to fakt o integrowanej usłudze, a nie
+domysł na temat Twojego biznesu.
+
+### Błąd przy starcie, i to celowo
+
+Opcje są walidowane w loaderze modułu, więc źle skonfigurowana wtyczka wywala się
+przy starcie z konkretnym komunikatem, a nie przy pierwszym wywołaniu inFaktu w
+środku czyjegoś zakupu. `environment`, `currency`, `taxSymbol`, `triggerEvent`,
+`ksef.mode`, `timeoutMs` i opcje typu funkcyjnego rzucają błędem, gdy są złe.
+
+Dwa szczegóły warte zapamiętania:
+
+- **`ksef.requireActive` musi być wartością logiczną, nie napisem, który tak
+  wygląda.** `requireActive: process.env.COS` daje `"false"`, co test na
+  prawdziwość honoruje jako **true**. Operator byłby przekonany, że kontrola przy
+  starcie jest wyłączona, podczas gdy działa, albo odwrotnie. Oba kierunki są złe,
+  więc zamiast konwersji jest błąd.
+- **`startDate` wywala się głośno przy złym formacie.** Wartość obecna, ale
+  niepoprawna, rzuca błędem zamiast być czytana jako brak, bo literówka w tym
+  miejscu nie może po cichu zamienić się w „fakturuj wszystko". Żeby nie mieć
+  granicy, po prostu pomiń tę opcję.
+
+`apiKey` jest świadomym wyjątkiem od zasady „błąd przy starcie": brak lub pusta
+wartość daje `enabled: false` i wtyczka wstaje bezczynna. Sklep, który nie
+wstaje, bo ktoś nie ustawił poświadczenia, to gorszy wynik niż sklep, który
+wstaje z widocznie wyłączonym fakturowaniem. Mówi o tym i log loadera, i panel.
+
+## Trzy wyłączniki
+
+Fakturowanie działa tylko wtedy, gdy wszystkie trzy się zgadzają. Pierwszeństwo od
+najmocniejszego:
+
+1. **`INFAKT_INVOICING_DISABLED`** - hamulec bezpieczeństwa na poziomie
+   środowiska (`1`, `true` albo `yes`, bez rozróżniania wielkości liter). Przebija
+   wszystko, łącznie z odpauzowaniem zapisanym już w panelu, i **nie da się go
+   zwolnić z panelu**. Operator przestawia go przy wdrożeniu albo migracji, bez
+   ruszania `medusa-config.ts` i bazy.
+2. **Ustawiony `apiKey`** - bez poświadczenia nie ma czego pauzować ani wznawiać.
+3. **`invoicing_paused`** - przełącznik edytowalny z panelu, **domyślnie `true`**.
+
+Wynikowy `reason` przyjmuje jedną z wartości `env_force_disabled`, `no_api_key`,
+`paused` albo `active` i towarzyszy każdej odpowiedzi panelu.
+
+Pauza jest domyślnie włączona, bo obecność `apiKey` sama w sobie nie jest
+bezpiecznym sygnałem do rozpoczęcia fakturowania. Sklep migrujący ze starego
+systemu ma poświadczenie od pierwszego dnia, bo panel i kontrola KSeF go
+potrzebują, a fakturowanie ma stać wyłączone, dopóki ktoś świadomie go nie włączy.
+
+## Nadpisania edytowalne z panelu
+
+Pięć ustawień zmienia się na żywo, bez redeployu: `currency`, `ksef_mode`,
+`trigger_event`, `environment` i `api_key`.
+
+Każde jest przechowywane jako pole dopuszczające `null`, a **`null` znaczy „nie
+nadpisano, użyj opcji z `medusa-config.ts`"**. To właśnie czyni wdrożenie tego
+schematu na istniejącej instalacji bezpiecznym: wszystkie kolumny startują puste,
+co odtwarza dokładnie tę konfigurację, którą sklep już miał. Nic w sposobie
+fakturowania nie zmienia się, dopóki operator nie otworzy ustawień i nie zapisze
+pola z własnej woli.
+
+Każde miejsce decyzyjne w czasie działania czyta wynik scalenia, nigdy opcji
+startowych wprost, więc zmiana działa od następnego tiku. Wartości pochodne
+przeliczają się ze scalonych wejść: `ksefPossible` zależy od `ksefMode`, a
+`enabled` od `apiKey`. `ksefRequireActive` świadomie **nie** przelicza się z
+nadpisanego `environment`, bo nie jest wystawione jako edytowalne z panelu.
+
+### Nadpisany klucz API jest szyfrowany
+
+`api_key` to to samo poświadczenie, które niesie opcja wtyczki, więc nadpisanie
+jest przed zapisem szyfrowane kluczem `settingsEncryptionKey` (AES-256-GCM,
+wbudowane `crypto` Node'a, bez nowej zależności). Jawny tekst nigdy nie trafia do
+bazy i żadna trasa go nie odczytuje. Raportowane jest wyłącznie to, czy
+nadpisanie istnieje, jako `api_key_configured`.
+
+Zostaw `settingsEncryptionKey` nieustawione, a panel dalej zmienia każde inne
+ustawienie. Odmawia dokładnie jednej czynności, czyli zapisania jawnego
+poświadczenia do bazy, i podaje w komunikacie nazwę brakującej opcji.
+
+## Zmienne środowiskowe
+
+| Zmienna | Domyślnie | Do czego służy |
+| --- | --- | --- |
+| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Harmonogram workera. Zmienna, a nie opcja, bo Medusa czyta `config.schedule` zadania, zanim istnieje kontener. |
+| `INFAKT_INVOICING_DISABLED` | nieustawiona | Twarde wyłączenie. Opis wyżej. |
+
+## API panelu
+
+Każda trasa siedzi pod `/admin/infakt` i korzysta ze standardowego
+uwierzytelniania panelu Medusy. Żadna nigdy nie zwraca materiału tajnego.
+
+### `GET /admin/infakt`
+
+Wszystko, czego strona fakturowania potrzebuje w jednym przebiegu: efektywna
+konfiguracja, stan włączenia i jego powód. Klucz API nigdy nie wraca.
+
+### `GET /admin/infakt/settings`
+
+Pełny stan formularza: przełącznik działania, surowe nadpisanie każdego pola
+edytowalnego z panelu oraz wartość efektywna, do której każde z nich się aktualnie
+sprowadza. Nie dotyka klienta inFaktu, więc jest bezpieczna w każdym stanie,
+łącznie z całkowicie wyłączonym.
+
+### `POST /admin/infakt/settings`
+
+Ciało: dowolne z `invoicing_paused`, `currency`, `ksef_mode`, `trigger_event`,
+`environment`, `api_key`. Zapisywane są wyłącznie pola obecne w żądaniu, więc
+zapis samej waluty nie rusza pauzy. Wymagane jest co najmniej jedno rozpoznane
+pole, żeby ktoś, kto przekręcił wszystkie nazwy kluczy, dostał czytelne `400`, a
+nie `200`, po którym nic się nie zmieniło. Pusty napis w `api_key` czyści
+nadpisanie.
+
+Oba użyte przepływy są kompensowalne, więc awaria dalej w łańcuchu przywraca to,
+co ten zapis zmienił, zamiast zostawić konfigurację w połowie. Odpowiedź to zawsze
+`200` z wynikowym stanem, nawet gdy wyłączenie ze środowiska sprawia, że świeżo
+zapisana pauza nie ma jeszcze znaczenia. Mówią o tym pola `effective_enabled` i
+`reason`.
+
+### `GET /admin/infakt/invoices`
+
+Rejestr, od najnowszych. Filtruj przez `status=needs_review`, stronicuj przez
+`limit` i `offset`, albo zawęź do jednego zamówienia przez `order_id` - tak
+właśnie widget na stronie zamówienia czyta swój jedyny wiersz.
+
+Nie dotyka klienta inFaktu, więc odpowiada `200` w każdym stanie: wtyczka
+nieskonfigurowana, zapauzowana albo pusta zwraca `{ invoices: [] }`, a nie `500`.
+`order_id` niepasujące do żadnego wiersza zwraca ten sam pusty wynik, który widget
+renderuje jako „niezakolejkowane", zamiast traktować jak błąd.
+
+Każdy wiersz jest opatrzony polem `in_crash_window`, żeby interfejs mógł wyłączyć
+ponowienie tam, gdzie mogłoby ono wystawić duplikat.
+
+### `POST /admin/infakt/invoices/:id`
+
+Powierzchnia operatora dla odłożonej faktury: **ponów**, **przejmij** istniejącą
+fakturę z inFaktu, **wyczyść** znacznik okna awarii albo **pomiń** zamówienie. To,
+która czynność jest dla danego wiersza dozwolona, rozstrzyga czysty i przetestowany
+planer, a wykonuje kompensowalny przepływ.
+
+Odmowa to **409, nie 400**: żądanie było poprawne, a niemożliwą czyni je stan
+wiersza. Treść powodu jest pisana dla osoby czytającej ją w panelu i mówi, co
+zrobić zamiast tego.
+
+### `GET /admin/infakt/invoices/:id/pdf`
+
+Strumieniuje PDF faktury, dzięki czemu przeglądarka nigdy nie potrzebuje klucza
+API - trzyma go wyłącznie backend. Rozwiązuje dokument po `invoice_uuid`, a gdy go
+brak, dochodzi do uuid przez `invoice_number`. Wiersz bez jednego i drugiego to
+`404`, a nie zepsuty plik.
+
+### `POST /admin/infakt/enqueue`
+
+Ciało: `{ "order_id": "order_01..." }`. Ręczne zakolejkowanie zamówienia.
+Dostarczanie zdarzeń jest co najwyżej jednokrotne, więc zamówienie może zostać
+pominięte i to jest ścieżka ratunkowa. Odmawia wtedy, kiedy odmówiłby też
+subscriber. Zakolejkowanie czegoś, co już jest w kolejce, jest bezczynne, a nie
+błędne.
+
+### `POST /admin/infakt/ksef-check`
+
+Ponowna weryfikacja integracji KSeF na koncie, bez czekania na redeploy. Po to
+sięga operator zaraz po naprawieniu integracji w inFakcie. Zabezpieczone
+sprawdzeniem `apiKey` przed czymkolwiek innym.
+
+### `GET` i `POST /admin/infakt/reconcile`
+
+Przejmowanie faktur już istniejących w inFakcie. Domyślnie przebieg próbny.
+Zobacz [Uzgadnianie i przejmowanie faktur](./reconciliation.pl.mdx).
