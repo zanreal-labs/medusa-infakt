@@ -1,0 +1,202 @@
+---
+title: Settings and the admin API
+description: Every plugin option, the admin-editable overrides that need no redeploy, the three switches that can turn invoicing off, and a reference for every admin route.
+---
+
+## Plugin options
+
+Everything comes from `medusa-config.ts`. Medusa hands the plugin's `options`
+object to every module inside it unchanged. Secrets belong in environment
+variables the config file reads - the plugin never reads `process.env` for
+credentials itself, so a host project keeps one place where its secrets are
+wired.
+
+| Option | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `apiKey` | `string` | none | inFakt API key, sent as `X-inFakt-ApiKey`. **This is the on/off switch.** |
+| `environment` | `"production" \| "sandbox"` | `"production"` | Which inFakt to talk to. |
+| `startDate` | `string` | none | Strict `YYYY-MM-DD` floor. Orders placed before it are skipped. |
+| `currency` | `string` | `"PLN"` | Orders in any other currency are skipped. |
+| `taxSymbol` | `string` | `"23"` | inFakt VAT symbol on every line: `"23"`, `"8"`, `"5"`, `"0"`, `"zw"`, `"np"`. |
+| `triggerEvent` | `"payment.captured" \| "order.placed"` | `"payment.captured"` | Which event enqueues an order. |
+| `ksef.mode` | `"nip-only" \| "all" \| "never"` | `"nip-only"` | Who gets filed. See [KSeF filing](./ksef.en.mdx). |
+| `ksef.requireActive` | `boolean` | `true` in production, `false` in sandbox | Verify the KSeF integration at startup. |
+| `ksef.decide` | function | none | Per-invoice predicate. Overrides `mode` entirely, including `never`. |
+| `nipExtractor` | function | three-place default | Where to find the buyer's NIP. |
+| `emitIssuedEvent` | `boolean` | `true` | Emit `infakt.invoice.issued` once an invoice is issued. |
+| `timeoutMs` | `number` | `60000` | Per-request timeout for inFakt calls. |
+| `settingsEncryptionKey` | `string` | none | Key material for encrypting an admin-set `apiKey` override at rest. |
+
+### Two defaults that are kept on purpose
+
+`currency: "PLN"` and `taxSymbol: "23"` look like the shipped preferences this
+codebase otherwise refuses to have. They are not.
+
+inFakt is a Polish invoicing and bookkeeping service: an account is a Polish
+registered business, its books are Polish books, and its ledger currency is PLN.
+Defaulting to anything else would describe no real inFakt account. Likewise `23`
+is not a rate the plugin picked - it is inFakt's own symbol for the Polish basic
+VAT rate, a value from the integrated service's vocabulary. Both are facts about
+the service being integrated, not guesses at your business.
+
+### Failing at boot, on purpose
+
+Options are validated in the module loader, so a misconfigured plugin fails at
+boot with a precise message rather than at the first inFakt call in the middle of
+a customer's checkout. `environment`, `currency`, `taxSymbol`, `triggerEvent`,
+`ksef.mode`, `timeoutMs` and the function-typed options all throw when wrong.
+
+Two details worth knowing:
+
+- **`ksef.requireActive` must be a boolean, not a boolean-looking string.**
+  `requireActive: process.env.SOMETHING` yields `"false"`, which a truthiness
+  test honours as **true**. The operator would believe the startup check was off
+  while it was on, or the reverse. Both directions are bad, so it fails instead
+  of coercing.
+- **`startDate` fails loudly when malformed.** A present-but-invalid value throws
+  rather than being read as absent, because a typo there must never silently
+  become "invoice everything". Leave it out entirely to have no floor.
+
+`apiKey` is the deliberate exception to failing at boot: absent or blank resolves
+to `enabled: false` and the plugin boots inert. A store that cannot boot because
+a credential was left unset is a worse outcome than one that boots with invoicing
+visibly off, and the loader log and the admin UI both say so.
+
+## The three switches
+
+Invoicing runs only when all three agree. Precedence, most to least
+authoritative:
+
+1. **`INFAKT_INVOICING_DISABLED`** - an environment-level emergency brake
+   (`1`, `true` or `yes`, case-insensitive). It overrides everything, including
+   an admin having already unpaused invoicing, and **cannot be released from
+   inside the admin**. An operator flips it during a deploy or a cutover without
+   touching `medusa-config.ts` or the database.
+2. **`apiKey` configured** - nothing to pause or resume without a credential.
+3. **`invoicing_paused`** - the admin-editable switch, **defaulting to `true`**.
+
+The resulting `reason` is one of `env_force_disabled`, `no_api_key`, `paused` or
+`active`, and every admin response carries it.
+
+The pause switch defaults to on because `apiKey` being present is not, on its
+own, a safe signal to start invoicing. A store cutting over from a legacy system
+has the credential from day one - the admin UI and the KSeF health check need
+it - while invoicing must stay off until someone deliberately turns it on.
+
+## Admin-editable overrides
+
+Five settings can be changed live, with no redeploy: `currency`, `ksef_mode`,
+`trigger_event`, `environment` and `api_key`.
+
+Each is stored nullable, and **null means "not overridden - use the
+`medusa-config.ts` option"**. That is what makes shipping this schema onto an
+existing install safe: every column starts null, which reproduces the exact
+configuration the store already had. Nothing about how it invoices changes until
+an operator opens the Settings page and saves a field on purpose.
+
+Every runtime decision point reads the merged result, never the boot options
+directly, so an edit takes effect on the very next tick. Derived values are
+recomputed from the merged inputs - `ksefPossible` depends on `ksefMode`, and
+`enabled` depends on `apiKey`. `ksefRequireActive` is deliberately **not**
+recomputed from an `environment` override, since it is not exposed as
+admin-editable.
+
+### The API key override is encrypted
+
+`api_key` is the same credential the plugin option carries, so an override is
+encrypted with `settingsEncryptionKey` before it is persisted (AES-256-GCM,
+Node's built-in `crypto`, no new dependency). The plaintext is never stored and
+never read back by any route - only whether an override exists is ever reported,
+as `api_key_configured`.
+
+Leave `settingsEncryptionKey` unset and the admin can still change every other
+setting. It refuses exactly one action, writing a plaintext credential to the
+database, with a message naming the option.
+
+## Environment variables
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Worker schedule. An env var rather than an option because Medusa reads a job's `config.schedule` before the container exists. |
+| `INFAKT_INVOICING_DISABLED` | unset | Hard force-off. See above. |
+
+## Admin API
+
+Every route is under `/admin/infakt` and uses Medusa's standard admin
+authentication. No route ever returns secret material.
+
+### `GET /admin/infakt`
+
+Everything the Invoicing page needs in one round trip: the effective
+configuration, the enablement state and its reason. Never returns the API key.
+
+### `GET /admin/infakt/settings`
+
+The form's whole state: the runtime enable switch, the raw override for each
+admin-editable field, and the effective value each currently resolves to. Never
+touches the inFakt client, so it is safe to call in every state including fully
+disabled.
+
+### `POST /admin/infakt/settings`
+
+Body: any of `invoicing_paused`, `currency`, `ksef_mode`, `trigger_event`,
+`environment`, `api_key`. Only the fields present are written, so saving the
+currency alone does not touch the pause switch. At least one recognized field is
+required, so a caller who mistyped every key gets a clear `400` rather than a
+`200` that changed nothing. An empty-string `api_key` clears the override.
+
+Both underlying workflows are compensable, so a failure downstream restores
+whatever the write changed rather than leaving configuration half-applied. It
+always answers `200` with the resulting state, even when the environment
+force-off means a pause-switch write has no effect yet - `effective_enabled` and
+`reason` say so.
+
+### `GET /admin/infakt/invoices`
+
+The ledger, newest first. Filter with `status=needs_review`, paginate with
+`limit` and `offset`, or narrow to one order with `order_id`, which is how the
+order-detail widget reads its single row.
+
+Never touches the inFakt client, so it answers `200` in every state: an
+unconfigured, paused or empty plugin returns `{ invoices: [] }`, not a `500`. An
+`order_id` matching no row returns the same empty payload, which the widget
+renders as "not queued" rather than as an error.
+
+Each row is annotated `in_crash_window` so the UI can disable retry where
+retrying could issue a duplicate.
+
+### `POST /admin/infakt/invoices/:id`
+
+The operator surface for a parked invoice: **retry**, **adopt** an existing
+inFakt invoice, **clear** the crash-window marker, or **skip** the order. Which
+action a row allows is decided by a pure, unit-tested planner and carried out by
+a compensable workflow.
+
+A refused action answers **409, not 400**: the request was well-formed, and it is
+the row's state that makes it impossible. The reason string is written for the
+person reading it in the admin and says what to do instead.
+
+### `GET /admin/infakt/invoices/:id/pdf`
+
+Streams the invoice PDF, so the browser never needs the inFakt API key - this
+backend is the only thing that ever holds it. Resolves by `invoice_uuid` when
+present, otherwise by looking the uuid up from `invoice_number`. A row with
+neither is a `404` rather than a broken PDF.
+
+### `POST /admin/infakt/enqueue`
+
+Body: `{ "order_id": "order_01..." }`. Manually queue an order. Event delivery is
+at-most-once, so an order can be missed; this is the recovery path. Refused
+whenever the subscriber would also refuse. Queuing an already-queued order is a
+no-op, not an error.
+
+### `POST /admin/infakt/ksef-check`
+
+Re-verify the account's KSeF integration now rather than waiting for a redeploy.
+This is what an operator reaches for straight after fixing the integration in
+inFakt. Guarded on `apiKey` being configured before anything else.
+
+### `GET` and `POST /admin/infakt/reconcile`
+
+Adoption of invoices that already exist in inFakt. Dry run by default. See
+[Reconciliation and adoption](./reconciliation.en.mdx).

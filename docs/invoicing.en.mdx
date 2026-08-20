@@ -1,0 +1,155 @@
+---
+title: The invoicing pipeline
+description: From the trigger event to a finished invoice - the fully-paid gate, the five skip conditions, the durable state machine, the crash window that is never retried, and how backoff works.
+---
+
+The trigger only enqueues. Everything that decides whether an invoice is
+actually issued happens later, in a worker that re-reads the order fresh on every
+tick.
+
+That split is the whole point. `payment.captured` fires once per capture, and an
+order can be captured in parts. Invoicing on the first capture would issue an
+invoice for the full order total against a partial payment.
+
+## Getting from an event to an order
+
+Two trigger events are supported, and they deliver different payloads:
+
+| Event | `id` in the payload | How the order is reached |
+| --- | --- | --- |
+| `order.placed` | the order | directly |
+| `payment.captured` (default) | a **payment** | a graph hop through `payment_collection.order` |
+
+The default is `payment.captured` because Medusa has no `order.paid` event and an
+invoice must state a payment that happened. `order.placed` exists for stores that
+invoice on placement, such as B2B on invoice terms, and it is safe: the
+fully-paid gate still holds the row until the money arrives. The event only
+decides when the row is created.
+
+A payment that resolves to no order returns `null` rather than throwing. A
+payment collection for a cart that never became an order, or one attached to a
+claim or exchange, is a real and expected shape - throwing would make Medusa
+retry the event forever over something that is not an error.
+
+## The gates, evaluated on every tick
+
+Before any step runs, the worker re-reads the order and checks five things. Each
+one produces a `skipped` row with a reason, not a silent no-op.
+
+1. **Already invoiced elsewhere.** If `order.metadata.invoice_number` is set, the
+   order was invoiced outside this pipeline and is skipped. If the row *also*
+   already has an `invoice_uuid` from this pipeline, that is a conflict a human
+   resolves, not something the row picks a side on.
+2. **Before the start date.** With `startDate` configured, an order placed before
+   it is skipped. The comparison is on Warsaw calendar days, matching how the
+   date is written on the invoice - comparing raw timestamps would put an order
+   placed at 01:00 Warsaw on the start date on the wrong side of it.
+3. **Wrong currency.** An order in any currency other than the configured one is
+   skipped.
+4. **Canceled.** Canceled before invoicing is a skip. Canceled *after* the
+   invoice was issued goes to `needs_review`: a corrective invoice is a legal
+   document with its own rules, and the plugin does not issue one on its own.
+5. **Not fully paid.** The row is deferred and re-checked in 30 minutes. If the
+   order stops being fully paid *after* its invoice was issued, that is
+   `needs_review` rather than an endless wait for re-payment.
+
+### The fully-paid gate
+
+Captures are summed net of refunds across every payment collection, preferring
+each collection's own `captured_amount` and falling back to summing its payments
+when that aggregate is absent. Canceled payments are skipped, because a canceled
+payment's `captured_amount` can still be non-zero from before the cancellation.
+
+Everything is compared in **integer minor units**. Comparing decimals invites the
+classic `133.44 !== 133.44000000000001` stall, where an order is paid in full and
+the pipeline waits for it forever.
+
+Every default in that summation moves the answer *away* from paid: an absent
+refund really is no refund, and an unreadable capture counts for nothing. The
+worst case is one more deferred tick, never an invoice against a payment that did
+not happen. The order total is the one value that is never defaulted - if it
+cannot be read, the gate refuses outright.
+
+## The state machine
+
+The next step is derived purely from which columns are still null:
+
+```text
+  invoice_uuid null?  -> task_reference set?  -> resolve-create-task
+                      -> submit_started_at set? -> CRASH WINDOW (refuse)
+                      -> otherwise              -> submit-create
+  invoice_number null?                          -> fetch-invoice-number
+  ksef_required and no ksef_number?             -> ksef_sent_at set ? poll-ksef : send-to-ksef
+  emitEvent and no event_emitted_at?            -> emit-event
+  otherwise                                     -> complete
+```
+
+There is no step counter and no progress held in memory, which is exactly what
+makes a crash at any instant recoverable. The pure rules live in
+`src/lib/invoicing/state-machine.ts` with no database and no HTTP client, so the
+crash-safety properties are unit-testable.
+
+## The crash window
+
+`submit_started_at` is written **before** the create call. If the worker later
+finds that column set with no `task_reference`, the create may have reached
+inFakt and it stops:
+
+> a previous inFakt create attempt may have gone through without a stored task
+> reference - check inFakt for a stray invoice, then adopt it with link-manually
+> or clear the row
+
+The row goes to `needs_review` and is never retried automatically. A human checks
+inFakt, then either adopts the stray invoice or clears the marker. Rows in this
+state are annotated `in_crash_window` by the ledger API so the admin UI can
+disable retry, rather than letting an operator discover the problem from an error
+message.
+
+Automatically retrying that one create is the failure mode this design refuses.
+Everything else retries, because everything else is either idempotent or
+observable.
+
+## Outcomes, retries and backoff
+
+A step unwinds by throwing one of three control-flow signals, or a real error:
+
+| Signal | Meaning | Counts an attempt? |
+| --- | --- | --- |
+| `defer` | not done, not a failure - still processing, or not yet paid | **No** |
+| `review` | terminal, needs a human | n/a, terminal |
+| `skip` | deliberately not invoiced, with a reason | **No** |
+| a thrown error | retry with backoff | Yes |
+
+Defer not counting an attempt is deliberate: a slow external system must not burn
+the row's retry budget. A row deferred a hundred times has spent nothing.
+
+Retries back off as `5 min * 2 ** attempts`, capped at 6 hours, so the first
+retry already waits 10 minutes - the failures worth retrying at all, such as rate
+limits and inFakt outages, do not clear in five. After **8 attempts** the row
+goes to `needs_review`, because an infinite retry loop against a permanently
+broken row is indistinguishable from a working pipeline in every dashboard.
+
+Some HTTP statuses are terminal immediately, with no retry: **400, 403, 404, 405,
+409, 422**. 409 is there because inFakt uses it for "this already happened",
+which a retry cannot improve. 429 and 5xx are deliberately absent - those are
+exactly what backoff exists for.
+
+`last_error` is truncated to 300 characters and carries no buyer PII; an inFakt
+validation dump can be kilobytes long.
+
+## Cadences
+
+| What | Interval |
+| --- | --- |
+| Worker schedule | `*/5 * * * *`, override with `INFAKT_WORKER_CRON` |
+| Re-check while inFakt or KSeF are still processing | 2 minutes |
+| Re-check while the order is not yet fully paid | 30 minutes |
+| First retry after a failure | 10 minutes, doubling to a 6 hour cap |
+
+The worker's schedule is an environment variable rather than a plugin option
+because Medusa reads a scheduled job's `config.schedule` at plugin-load time,
+before the container and the plugin's resolved options exist.
+
+Once an invoice is issued the plugin emits `infakt.invoice.issued`, unless
+`emitIssuedEvent` is set to false, so another plugin can react - attaching the
+PDF to a marketplace order, for instance.

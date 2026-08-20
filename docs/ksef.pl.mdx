@@ -1,0 +1,138 @@
+---
+title: Wysyłka do KSeF
+description: "Trzy tryby i dlaczego to nie jest wartość logiczna, co czyni fakturę dokumentem B2B, kontrola integracji przy starcie i co odrzucenie robi z wierszem."
+---
+
+Krajowy System e-Faktur jest obowiązkowy. Od **kwietnia 2026** faktura B2B, czyli
+wystawiona nabywcy zidentyfikowanemu numerem NIP, musi tam trafić. Kary za brak
+wysyłki zaczynają obowiązywać w **styczniu 2027**. Faktura konsumencka, bez NIP-u,
+jest poza systemem.
+
+## Dlaczego `mode` nie jest wartością logiczną
+
+Bo „wysyłaj wszystko" i „nie wysyłaj nic" są obie złymi wartościami domyślnymi, a
+skutek w obie strony jest cichy. Sklep, który przestał wysyłać, wygląda dokładnie
+tak samo jak sklep, który nigdy nie miał zamówień B2B.
+
+```ts
+ksef: { mode: "nip-only" }  // domyślnie
+```
+
+| Tryb | Zachowanie |
+| --- | --- |
+| `nip-only` (domyślny) | Nabywca z NIP-em trafia do KSeF, konsument nie. Tego wymaga prawo. |
+| `all` | Każda faktura trafia do KSeF, łącznie z konsumenckimi. |
+| `never` | Nic nie trafia do KSeF. **Wyłącznie rozwój i testy** - na produkcji to decyzja o złamaniu obowiązku prawnego. |
+
+Rozstrzygnięcie zapisuje się **przy każdej fakturze**, razem z uzasadnieniem, w
+kolumnach `ksef_required` i `ksef_decision_reason`. Audyt odpowiada wtedy na
+pytanie „dlaczego akurat ta nie poszła?" bez odtwarzania tego z konfiguracji,
+która mogła się od tamtej pory zmienić. Uzasadnienia to zwykłe zdania:
+
+- `buyer has a NIP - B2B invoice, mandatory in KSeF`
+- `buyer has no NIP - consumer invoice, outside KSeF`
+- `ksef.mode is "never" - filing disabled for this deployment`
+- `ksef.mode is "all" - every invoice is filed`
+
+Żadne z nich nie zawiera danych osobowych nabywcy.
+
+## Co czyni fakturę dokumentem B2B
+
+NIP na zbudowanej fakturze i nic poza tym. Nie kształt zamówienia w chwili, gdy
+na nie patrzysz, tylko znormalizowany numer podatkowy samego dokumentu.
+
+Rdzeń Medusy nie ma pola na numer podatkowy nabywcy biznesowego, więc każdy
+storefront trzyma go gdzie indziej. Domyślny ekstraktor sprawdza trzy miejsca, w
+tej kolejności:
+
+1. `order.metadata.nip`
+2. `billing_address.metadata.nip`
+3. NIP wyłuskany z `billing_address.company`
+
+Zamiast przebudowywać własne zamówienia, nadpisz `nipExtractor`:
+
+```ts
+nipExtractor: (order) => order.metadata?.vat_id as string | undefined,
+```
+
+Numer, który nie jest poprawnym polskim NIP-em, nie czyni faktury dokumentem
+B2B. Suma kontrolna jest naprawdę liczona i wtyczka nie potraktuje dowolnego
+ciągu cyfr jak numeru podatkowego. Wartość `5261040828`, która przewija się przez
+testy, to opublikowany przykład Ministerstwa Finansów i właśnie dlatego jest
+jedynym numerem, jaki test NIP-u może bezpiecznie zaszyć na stałe.
+
+## Własny predykat
+
+`ksef.decide` przebija `mode` w całości, **łącznie z `never`**:
+
+```ts
+ksef: {
+  mode: "nip-only",
+  decide: ({ isCompany, nip, orderId }) => isCompany && nip !== NIP_ZWOLNIONY,
+}
+```
+
+To przebicie jest zamierzone. `never` istnieje jako wyłącznik na czas rozwoju, a
+operator, który napisał predykat, powiedział coś bardziej szczegółowego niż tryb.
+Uzasadnienie zapisuje, które z dwóch odpowiedziało
+(`custom ksef.decide predicate selected/excluded this invoice from KSeF`), więc
+przebicie widać w śladzie audytowym, zamiast wyglądać na to, że tryb się zepsuł.
+
+## `requireActive`, czyli kontrola przy starcie
+
+```ts
+ksef: { requireActive: true }
+```
+
+Sprawdza przy starcie, czy integracja KSeF na koncie inFakt jest aktywna, i
+kończy się głośnym błędem, kiedy nie jest. Domyślnie **włączone na produkcji,
+wyłączone w sandboksie**.
+
+Ta asymetria jest celowa. Wdrożenie sandboksowe zwykle przerabia ścieżkę
+fakturową w ogóle bez podpiętego tokenu KSeF, więc wymaganie aktywnej integracji
+zamieniłoby pierwsze uruchomienie u każdego programisty w twardy błąd. Na
+produkcji jest odwrotnie: nieaktywna integracja oznacza faktury B2B po cichu
+piętrzące się w `needs_review`, podczas gdy mija termin ustawowy.
+
+Kontrola jest całkiem pomijana tam, gdzie nie mogłaby mieć znaczenia, czyli przy
+`mode: "never"` bez własnego predykatu. Wdrożenie, które świadomie zrezygnowało,
+nie dostaje przez to straszącego wpisu w logu.
+
+`requireActive` należy do nielicznych ustawień, których **nie** da się zmienić z
+panelu. Nadpisanie `environment` zapisane na stronie ustawień go nie przelicza.
+Zawsze odzwierciedla konfigurację z chwili startu.
+
+Naprawiłeś integrację w inFakcie i nie chcesz czekać na redeploy?
+`POST /admin/infakt/ksef-check` uruchamia weryfikację od razu.
+
+## Co robi odrzucenie
+
+Wysyłka to dwa kroki, `send-to-ksef` i `poll-ksef`, każdy zapisujący stan przed
+następnym. inFakt raportuje trzy statusy dokumentu:
+
+| Status inFaktu | Znaczenie | Wynik w potoku |
+| --- | --- | --- |
+| `sent` | przyjęte, przetwarzane | odłożenie, sprawdzenie za 2 minuty |
+| `success` z `ksefNumber` | wysłane | koniec, numer zapisany |
+| `error` | odrzucone | `needs_review` |
+
+Odrzucenie jest ostateczne i nigdy nie jest ponawiane automatycznie. W
+`last_error` wiersza ląduje `KSeF rejected the invoice:` wraz z opisem
+`statusDescription` prosto z inFaktu, więc operator widzi powód podany przez
+system, a nie ogólnikową porażkę.
+
+**Nieznany status traktowany jest jak trwające przetwarzanie, nie jak błąd.**
+Gdyby inFakt dołożył nowy stan pośredni, nie może to odłożyć każdej faktury B2B
+do `needs_review`. Wiersz naprawdę zablokowany i tak tam trafi po wyczerpaniu
+ośmiu prób, więc ostrożny odczyt kosztuje wyłącznie zwłokę.
+
+Warto zauważyć, czego wysyłka **nie** robi z fakturą: dokument istnieje już w
+inFakcie i ma swój numer, zanim ktokolwiek odezwie się do KSeF. Niepowodzenie
+wysyłki zostawia Cię z prawdziwą, wystawioną fakturą, która nie została zgłoszona,
+i to jest dokładnie powód, dla którego wiersz zatrzymuje się na człowieku zamiast
+ponawiać w prawnej szarej strefie.
+
+Faktury przejęte nie są wysyłane nigdy. Przejęcie zapisuje dokument, który już
+istnieje, więc nic nie jest tworzone, nic nie idzie do KSeF i nie powstaje
+zdarzenie `infakt.invoice.issued`. Zobacz [Uzgadnianie i przejmowanie
+faktur](./reconciliation.pl.mdx).

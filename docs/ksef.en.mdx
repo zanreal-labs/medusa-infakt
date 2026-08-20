@@ -1,0 +1,137 @@
+---
+title: KSeF filing
+description: The three modes and why the setting is not a boolean, what makes an invoice B2B, the startup health check, and what a KSeF rejection does to a row.
+---
+
+Krajowy System e-Faktur is Poland's mandatory national e-invoicing system. From
+**April 2026** a B2B invoice - one issued to a buyer identified by a NIP - must be
+filed there. Penalties for not filing start in **January 2027**. A consumer
+invoice, with no NIP, sits outside the system.
+
+## Why `mode` is not a boolean
+
+Because "file everything" and "file nothing" are both wrong defaults, and the
+failure is silent either way. A store that quietly stops filing looks exactly
+like a store that never had B2B orders.
+
+```ts
+ksef: { mode: "nip-only" }  // the default
+```
+
+| Mode | Behaviour |
+| --- | --- |
+| `nip-only` (default) | A buyer with a NIP is filed; a consumer is not. This is what the law requires. |
+| `all` | Every invoice is filed, consumer ones included. |
+| `never` | Nothing is filed. **Development and testing only** - in production this is a decision to break a legal obligation. |
+
+The decision is recorded **per invoice**, with its reason, on the ledger row
+(`ksef_required`, `ksef_decision_reason`). An audit can answer "why was this one
+not filed?" without re-deriving it from configuration that may have changed
+since. The reason strings are plain sentences:
+
+- `buyer has a NIP - B2B invoice, mandatory in KSeF`
+- `buyer has no NIP - consumer invoice, outside KSeF`
+- `ksef.mode is "never" - filing disabled for this deployment`
+- `ksef.mode is "all" - every invoice is filed`
+
+None of them contains buyer PII.
+
+## What makes an invoice B2B
+
+A NIP on the built invoice, and nothing else. Not the order's shape at the time
+you look at it - the invoice's own tax code, normalized.
+
+Medusa core has no field for a business buyer's tax id, so every storefront puts
+it somewhere different. The default extractor looks in three places, in order:
+
+1. `order.metadata.nip`
+2. `billing_address.metadata.nip`
+3. a NIP parsed out of `billing_address.company`
+
+Override `nipExtractor` rather than reshaping your orders:
+
+```ts
+nipExtractor: (order) => order.metadata?.vat_id as string | undefined,
+```
+
+A tax code that is not a valid Polish NIP does not make an invoice B2B. Checksum
+validation is real: the plugin will not treat arbitrary digits as a tax id. The
+value `5261040828` used throughout the tests is the Polish Ministry of Finance's
+own published example, which is why it is the one number a NIP test can safely
+hard-code.
+
+## The custom predicate
+
+`ksef.decide` overrides `mode` entirely, **including `never`**:
+
+```ts
+ksef: {
+  mode: "nip-only",
+  decide: ({ isCompany, nip, orderId }) => isCompany && nip !== SOME_EXEMPT_NIP,
+}
+```
+
+That override is intentional. `never` exists as a development kill switch, and an
+operator who has written a predicate has made a more specific statement than the
+mode does. The reason string records which of the two answered
+(`custom ksef.decide predicate selected/excluded this invoice from KSeF`), so the
+override is visible in the audit trail rather than looking like the mode
+misbehaved.
+
+## `requireActive`, the startup check
+
+```ts
+ksef: { requireActive: true }
+```
+
+Verifies at startup that the inFakt account's KSeF integration is active, and
+fails loudly when it is not. It **defaults to true in production and false in
+sandbox**.
+
+The asymmetry is deliberate. A sandbox deployment is usually exercising the
+invoice path with no KSeF token attached at all, so demanding an active
+integration there turns every developer's first run into a hard failure.
+Production is the opposite: an inactive integration means B2B invoices silently
+pile up in `needs_review` while a legal deadline passes.
+
+The check is skipped entirely when it could not matter - `mode: "never"` with no
+custom predicate - so a deployment that opted out on purpose does not get a scary
+log line.
+
+`requireActive` is one of the few settings that is **not** admin-editable. An
+`environment` override saved from the Settings page does not recompute it; it
+always reflects the boot configuration.
+
+Fixed the integration in inFakt and do not want to wait for a redeploy?
+`POST /admin/infakt/ksef-check` re-runs the verification immediately.
+
+## What a rejection does
+
+Filing is two steps, `send-to-ksef` then `poll-ksef`, each persisting before the
+next. inFakt reports three document statuses, mapped as:
+
+| inFakt status | Meaning | Pipeline outcome |
+| --- | --- | --- |
+| `sent` | accepted, processing | defer, re-check in 2 minutes |
+| `success` with a `ksefNumber` | filed | done, number stored |
+| `error` | rejected | `needs_review` |
+
+A rejection is terminal and never retried automatically. The row's `last_error`
+carries `KSeF rejected the invoice:` followed by inFakt's own
+`statusDescription`, so an operator sees the authority's reason rather than a
+generic failure.
+
+**An unknown status is treated as still processing, not as an error.** If inFakt
+adds a new intermediate state, that must not park every B2B invoice in
+`needs_review`. A genuinely stuck row still lands there once it exhausts its 8
+attempts, so the conservative reading costs nothing but a delay.
+
+Note what filing does *not* do to the invoice: the document already exists in
+inFakt with its number before KSeF is ever contacted. A KSeF failure leaves you
+with a real, issued invoice that has not been filed - which is precisely why the
+row stops for a human instead of retrying into a legal grey area.
+
+Adopted invoices are never filed. Adoption records a document that already
+exists, so no invoice is created, none is sent to KSeF, and no
+`infakt.invoice.issued` event is emitted. See [Reconciliation and
+adoption](./reconciliation.en.mdx).

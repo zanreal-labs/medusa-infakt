@@ -1,0 +1,153 @@
+---
+title: Wprowadzenie
+description: "Fakturowanie dla Medusy v2 przez inFakt: dokument dla opłaconego zamówienia, wysyłka faktur B2B do KSeF i zatrzymanie się na każdej wątpliwości zamiast zgadywania."
+---
+
+Od kwietnia 2026 faktura B2B musi trafić do KSeF. Kary za brak wysyłki ruszają w
+styczniu 2027. To nie jest funkcja, którą można dorobić „kiedyś", i nie jest to
+też coś, co wolno robić po omacku.
+
+`@zanreal/medusa-infakt` bierze opłacone zamówienie z Medusy, wystawia z niego
+fakturę w [inFakcie](https://www.infakt.pl/), wysyła ją do KSeF wtedy, kiedy
+wymaga tego prawo, i zapisuje wynik we własnym rejestrze. Kiedy coś się nie
+zgadza, zatrzymuje się i pyta.
+
+## Dlaczego pyta, zamiast próbować dalej
+
+Bo faktura to nie jest wiersz w bazie, który da się po cichu poprawić jutro. Ma
+kolejny numer w serii, jest raportowana do urzędu i trafia do klienta. Z tego
+wynikają dwie rzeczy, które przewijają się przez całą wtyczkę.
+
+**Endpoint tworzący fakturę w inFakcie nie ma klucza idempotencji.** Powtórzony
+POST wystawia drugą, prawdziwą, ponumerowaną fakturę. Dlatego wtyczka zapisuje
+`submit_started_at` *przed* wywołaniem, a jeśli po restarcie zastanie tę kolumnę
+wypełnioną bez identyfikatora zadania, odmawia ponowienia i odkłada wiersz do
+przejrzenia przez człowieka. To jedyna sytuacja, której ta konstrukcja świadomie
+nie automatyzuje. Zobacz [Potok fakturowania](./invoicing.pl.mdx).
+
+**Złe dopasowanie faktury do zamówienia jest gorsze niż brak dopasowania.** Przy
+przejmowaniu dokumentów, które już są w inFakcie, każde kryterium to twarda
+równość: nabywca, dzień i kwota brutto co do grosza. Kilku kandydatów oznacza
+wynik niejednoznaczny, a niejednoznaczny nigdy nie jest stosowany automatycznie.
+Zobacz [Uzgadnianie i przejmowanie faktur](./reconciliation.pl.mdx).
+
+## Dwa wyłączniki i oba są domyślnie wyłączone
+
+Sama instalacja niczego nie zafakturuje i to jest celowe.
+
+**`apiKey` jest włącznikiem.** Bez niego wtyczka wstaje bezczynna: nic nie trafia
+do kolejki, nic nie jest fakturowane, a log przy starcie mówi o tym raz. Nie ma
+osobnej flagi `enabled`. Odpięcie poświadczenia to wspierany sposób na wyłączenie
+tej integracji.
+
+**`invoicing_paused` ma domyślnie wartość `true`.** Nawet z ustawionym `apiKey`
+świeża instalacja nie wystawi niczego, dopóki operator nie odpauzuje jej na
+stronie ustawień. Sklep przechodzący ze starego systemu fakturowego musi mieć
+poświadczenie na miejscu od pierwszego dnia, żeby panel i kontrola KSeF w ogóle
+działały, a jednocześnie fakturowanie ma pozostać wyłączone. Zmiana w pliku
+konfiguracyjnym i redeploy są na taką decyzję za wolne i za łatwe do przeoczenia.
+
+Jest jeszcze `INFAKT_INVOICING_DISABLED`, hamulec bezpieczeństwa na poziomie
+środowiska, który przebija oba powyższe i którego nie da się zwolnić z panelu.
+Wszystkie trzy opisuje [Ustawienia i API panelu](./settings.pl.mdx).
+
+## Droga jednej faktury
+
+```text
+  payment.captured  ->  subscriber dopisuje wiersz (status: pending)
+                             |
+                             v
+   tik workera (co 5 minut, INFAKT_WORKER_CRON)
+                             |
+                    bramki: już zafakturowane? sprzed startDate?
+                            zła waluta? anulowane? opłacone w całości?
+                             |
+                             v
+                    utworzenie faktury w inFakcie   <- najpierw zapis submit_started_at
+                             |
+                    pobranie nadanego numeru
+                             |
+                    wysyłka do KSeF (jeśli wymagana)
+                             |
+                    zdarzenie infakt.invoice.issued
+                             |
+                             v
+                          done
+```
+
+Każde wywołanie zewnętrzne zapisuje swój wynik, zanim ruszy następne, a kolejny
+krok wynika wyłącznie z tego, które kolumny są jeszcze puste. Nie ma postępu
+trzymanego w pamięci ani licznika kroków, więc awaria w dowolnym momencie
+wznawia się dokładnie tam, gdzie się zatrzymała.
+
+Stany, które warto znać: `done`, `skipped` (świadomie niefakturowane, z powodem),
+`needs_review` (decyduje człowiek) oraz `pending` i `processing` po drodze.
+
+## Instalacja
+
+Tego pakietu nie ma jeszcze na npmie. Instaluje się go jako zależność gitową,
+przypiętą do konkretnego commitu:
+
+```jsonc title="package.json"
+{
+  "dependencies": {
+    "@zanreal/medusa-infakt": "github:zanreal-labs/medusa-infakt#1c7a50c551f59658156d6f0b024996946cd71417"
+  }
+}
+```
+
+Przypnij commit, na którym testowałeś. Nie ma jeszcze wydanego taga, więc `#main`
+przesunąłby się pod Tobą przy najbliższym pushu.
+
+Pakiet buduje się sam przy instalacji: `prepare` odpala `medusa plugin:build`,
+który zamienia pobrane źródła w katalog `.medusa/server`, wskazywany przez
+`exports`. pnpm 10 i nowsze domyślnie nie uruchamiają takiego skryptu dla
+zależności, której jeszcze nie ufają, więc trzeba go raz dopuścić u siebie:
+
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  "@zanreal/medusa-infakt@https://codeload.github.com/zanreal-labs/medusa-infakt/tar.gz/1c7a50c551f59658156d6f0b024996946cd71417": true
+```
+
+Klucz to dokładny adres archiwum, na które pnpm rozwiązuje przypięty commit,
+dlatego powtarza SHA z linii zależności. Przesuwasz pin, przesuwasz oba miejsca.
+
+Rejestracja wtyczki:
+
+```ts title="medusa-config.ts"
+import { defineConfig, loadEnv } from "@medusajs/framework/utils";
+
+loadEnv(process.env.NODE_ENV || "development", process.cwd());
+
+module.exports = defineConfig({
+  plugins: [
+    {
+      resolve: "@zanreal/medusa-infakt",
+      options: {
+        apiKey: process.env.INFAKT_API_KEY,
+        settingsEncryptionKey: process.env.INFAKT_SETTINGS_KEY,
+      },
+    },
+  ],
+});
+```
+
+Na koniec migracje, które pakiet ze sobą niesie:
+
+```bash
+npx medusa db:migrate
+```
+
+Sekrety trzymaj w zmiennych środowiskowych, które czyta plik konfiguracyjny. Sama
+wtyczka nigdy nie sięga do `process.env` po poświadczenia, dzięki czemu projekt
+ma jedno miejsce, w którym są one podpięte.
+
+## Co dalej
+
+- [Potok fakturowania](./invoicing.pl.mdx) - zdarzenie startowe, bramki, maszyna
+  stanów i co robi ponowienie.
+- [Wysyłka do KSeF](./ksef.pl.mdx) - kto trafia do systemu, dlaczego to nie jest
+  wartość logiczna i co się dzieje po odrzuceniu.
+- [Uzgadnianie i przejmowanie faktur](./reconciliation.pl.mdx) - jak dokumenty
+  już istniejące w inFakcie trafiają do właściwych zamówień.
+- [Ustawienia i API panelu](./settings.pl.mdx) - komplet opcji, nadpisań i tras.
