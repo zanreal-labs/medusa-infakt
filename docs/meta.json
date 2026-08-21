@@ -1,5 +1,5 @@
 {
-  "title": "@zanreal/medusa-infakt",
+  "title": "inFakt",
   "description": "Polish invoicing for Medusa v2: inFakt invoices for paid orders, KSeF filing for the B2B ones, and a durable pipeline that parks anything ambiguous for a human.",
   "pages": ["index", "invoicing", "ksef", "reconciliation", "settings"]
 }

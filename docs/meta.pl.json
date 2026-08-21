@@ -1,5 +1,5 @@
 {
-  "title": "@zanreal/medusa-infakt",
+  "title": "inFakt",
   "description": "Fakturowanie dla Medusy v2 przez inFakt: dokument dla opłaconego zamówienia, wysyłka faktur B2B do KSeF i trwały potok, który przy każdej wątpliwości czeka na człowieka.",
   "pages": ["index", "invoicing", "ksef", "reconciliation", "settings"]
 }
