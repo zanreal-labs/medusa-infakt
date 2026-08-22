@@ -386,7 +386,7 @@ describe("BigNumber quantity off query.graph", () => {
       ],
       total: new FakeBigNumber("206.00") as never,
     });
-    const mapped = toInvoiceOrderInput(order);
+    const mapped = toInvoiceOrderInput(order, "PLN");
     expect(mapped.items[0]?.quantity).toBe(1);
     expect(mapped.items[0]?.grossTotal).toBe(206);
   });
