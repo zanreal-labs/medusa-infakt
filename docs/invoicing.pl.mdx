@@ -149,7 +149,7 @@ Zrzut błędów walidacji z inFaktu potrafi mieć kilka kilobajtów.
 
 | Co | Odstęp |
 | --- | --- |
-| Harmonogram workera | `*/5 * * * *`, nadpisywany przez `INFAKT_WORKER_CRON` |
+| Harmonogram workera | `*/5 * * * *`, nadpisywany przez `INFAKT_WORKER_CRON`. Siatka bezpieczeństwa - opłacone zamówienie jest fakturowane natychmiast po `payment.captured`. |
 | Sprawdzenie, gdy inFakt albo KSeF wciąż przetwarzają | 2 minuty |
 | Sprawdzenie, gdy zamówienie nie jest jeszcze opłacone | 30 minut |
 | Pierwsze ponowienie po błędzie | 10 minut, podwajane do sufitu 6 godzin |

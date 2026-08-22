@@ -1,11 +1,29 @@
 import type { SubscriberArgs } from "@medusajs/framework";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveEffectiveEnablement } from "../lib/invoicing/enablement";
+import { runInvoicing } from "../lib/invoicing/run";
 import { resolveInfaktOptions } from "../lib/options";
 import type { InfaktPluginOptions } from "../lib/options";
 import { INFAKT_MODULE } from "../modules/infakt";
 import enqueueInvoiceSubscriber, { config } from "./enqueue-invoice";
+
+// The runner has its own suite (`src/lib/invoicing/run.test.ts`). What matters
+// here is only that the subscriber asks for the right run and survives it
+// failing.
+vi.mock("../lib/invoicing/run", () => ({ runInvoicing: vi.fn() }));
+
+beforeEach(() => {
+  vi.mocked(runInvoicing).mockReset();
+  vi.mocked(runInvoicing).mockResolvedValue({
+    completed: 1,
+    deferred: 0,
+    failed: 0,
+    processed: 1,
+    review: 0,
+    skippedRows: 0,
+  });
+});
 
 const logger = () => ({
   debug: vi.fn(),
@@ -157,12 +175,86 @@ describe("enqueueInvoiceSubscriber", () => {
     expect(duplicate.log.debug).toHaveBeenCalledWith(expect.stringContaining("already queued"));
   });
 
-  it("never issues an invoice itself - it only ever enqueues", async () => {
-    // The whole safety argument: event delivery is at-most-once and can arrive
-    // early, late or twice, while issuing an invoice is irreversible. The only thing
-    // this handler is allowed to do is record intent.
+  it("records intent exactly once, however the invoice is then issued", async () => {
+    // Event delivery is at-most-once and can arrive early, late or twice, while
+    // issuing an invoice is irreversible - so the handler still only ever records
+    // intent itself. Everything consequential happens inside the shared runner,
+    // behind the atomic claim.
     const { container, enqueueOrder } = harness();
     await run(container, "payment.captured", "pay_1");
     expect(enqueueOrder).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("enqueueInvoiceSubscriber: issuing the invoice the moment payment lands", () => {
+  it("runs the invoicing pipeline for that one order, right after enqueueing it", async () => {
+    const { container } = harness();
+    await run(container, "payment.captured", "pay_1");
+    expect(runInvoicing).toHaveBeenCalledWith(
+      container,
+      expect.objectContaining({ orderId: "order_1" }),
+    );
+  });
+
+  it("runs it for an order that was already queued, not just a fresh one", async () => {
+    // A re-delivered event, or a second capture, still finds a pending row. The
+    // due-predicate decides whether there is anything left to do - not this
+    // handler, and not whether the enqueue happened to create the row.
+    const { container } = harness({ enqueue: vi.fn().mockResolvedValue({ created: false }) });
+    await run(container, "payment.captured", "pay_1");
+    expect(runInvoicing).toHaveBeenCalledTimes(1);
+  });
+
+  it("never starts a run for an event it is ignoring", async () => {
+    const { container } = harness();
+    await run(container, "order.placed", "order_9");
+    expect(runInvoicing).not.toHaveBeenCalled();
+  });
+
+  it("never starts a run while invoicing is paused", async () => {
+    const { container } = harness({ invoicingPaused: true });
+    await run(container, "payment.captured", "pay_1");
+    expect(runInvoicing).not.toHaveBeenCalled();
+  });
+
+  it("never starts a run when the payment has no order behind it", async () => {
+    const { container } = harness({ orderId: null });
+    await run(container, "payment.captured", "pay_1");
+    expect(runInvoicing).not.toHaveBeenCalled();
+  });
+
+  it("swallows a KSeF refusal and leaves the row for the worker", async () => {
+    // The gate is deliberately unchanged: if KSeF is not ready the refusal stands.
+    // Throwing here would hand the event bus an unbounded retry of a pipeline whose
+    // safety rests on being re-entered deliberately, and the cron is already the
+    // designed retry.
+    vi.mocked(runInvoicing).mockRejectedValue(
+      new Error("KSeF is required but not ready: inFakt reports no active integration"),
+    );
+    const { container, log } = harness();
+    await expect(run(container, "payment.captured", "pay_1")).resolves.toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("stays queued"));
+  });
+
+  it("swallows any other failure too, and says the worker will retry", async () => {
+    vi.mocked(runInvoicing).mockRejectedValue(new Error("connection reset"));
+    const { container, log } = harness();
+    await expect(run(container, "payment.captured", "pay_1")).resolves.toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("connection reset"));
+  });
+
+  it("notes at debug when the run was skipped because another run held the claim", async () => {
+    vi.mocked(runInvoicing).mockResolvedValue({
+      completed: 0,
+      deferred: 0,
+      failed: 0,
+      processed: 0,
+      review: 0,
+      skipped: "another invoicing run holds the lock",
+      skippedRows: 0,
+    });
+    const { container, log } = harness();
+    await run(container, "payment.captured", "pay_1");
+    expect(log.debug).toHaveBeenCalledWith(expect.stringContaining("holds the lock"));
   });
 });

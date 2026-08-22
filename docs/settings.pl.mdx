@@ -119,7 +119,7 @@ poświadczenia do bazy, i podaje w komunikacie nazwę brakującej opcji.
 
 | Zmienna | Domyślnie | Do czego służy |
 | --- | --- | --- |
-| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Harmonogram workera. Zmienna, a nie opcja, bo Medusa czyta `config.schedule` zadania, zanim istnieje kontener. |
+| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Harmonogram workera. Zmienna, a nie opcja, bo Medusa czyta `config.schedule` zadania, zanim istnieje kontener. To interwał siatki bezpieczeństwa, a nie czas oczekiwania kupującego: subscriber `payment.captured` wystawia fakturę natychmiast. |
 | `INFAKT_INVOICING_DISABLED` | nieustawiona | Twarde wyłączenie. Opis wyżej. |
 
 ## API panelu

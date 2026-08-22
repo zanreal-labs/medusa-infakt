@@ -36,7 +36,9 @@ auto-applied. See [Reconciliation and adoption](./reconciliation.en.mdx).
   payment.captured  ->  subscriber enqueues a row (status: pending)
                              |
                              v
-   worker tick (every 5 min, INFAKT_WORKER_CRON)
+   the same subscriber runs the pipeline for that one order, at once
+   (the worker tick - every 5 min, INFAKT_WORKER_CRON - is the safety
+    net that retries anything it could not finish)
                              |
                     gates: already invoiced? before startDate?
                            wrong currency? canceled? fully paid?
