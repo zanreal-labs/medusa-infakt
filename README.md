@@ -313,7 +313,7 @@ payment.captured  ->  subscriber  ->  InfaktInvoice row (status: pending)
                                              |
                         invoice_number     ->  GET /invoices/{uuid}.json
                                              |
-                        ksef_sent_at       ->  POST .../send_to_ksef.json   (when required)
+                        ksef_sent_at       ->  POST /ksef2/documents/{uuid}/send.json (when required)
                                              |
                         ksef_number        ->  poll until "success"
                                              |
@@ -611,7 +611,7 @@ been issued.
 ### `requireActive`
 
 With `ksef.requireActive` on (the default in production), the worker verifies the inFakt
-account's KSeF integration via `GET /ksef/integration.json` and **fails the whole run
+account's KSeF integration via `GET /ksef2/integration.json` and **fails the whole run
 loudly** when it is not active - a clear error in the log and a red run state in the
 admin UI.
 

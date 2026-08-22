@@ -122,7 +122,7 @@ export interface InfaktInvoice {
 }
 
 /**
- * Result of `GET /ksef/documents/{uuid}/status.json`.
+ * Result of `GET /ksef2/documents/{uuid}/status.json`.
  *
  * `status` is one of "sent" (accepted, still processing), "success"
  * (`ksefNumber` assigned) or "error" (`statusDescription` carries the KSeF
@@ -137,7 +137,7 @@ export interface InfaktKsefStatus {
 }
 
 /**
- * Result of `GET /ksef/integration.json`.
+ * Result of `GET /ksef2/integration.json`.
  *
  * `active: false` means the inFakt account has no working KSeF authorization
  * token, so every `sendToKsef` call will be rejected with HTTP 422. This is the
