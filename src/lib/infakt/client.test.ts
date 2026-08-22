@@ -342,9 +342,11 @@ describe("InfaktClient", () => {
 
   /**
    * The outage regression. The probe used to ask `/ksef/integration.json` first
-   * and only fall back to `/ksef2/` on 403/404; inFakt switched KSeF 1.0 off with
-   * a different status, so the fallback never fired and the readiness check threw
-   * on every run - which, being fail-closed, stopped invoicing altogether.
+   * and only fall back to `/ksef2/` on 403/404; the retired namespace answers
+   * 410 Gone, so the fallback never fired and the readiness check threw on every
+   * run - which, being fail-closed, stopped invoicing altogether. The 410 body
+   * below is the live response, verbatim apart from the diacritics this file
+   * avoids.
    */
   it("getKsefIntegration never touches the retired KSeF 1.0 namespace", async () => {
     const fetchImpl = stubFetch((url) =>

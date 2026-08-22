@@ -404,10 +404,13 @@ export class InfaktClient {
    * invoice created now actually reach KSeF?" before the worker creates one.
    *
    * The legacy `/ksef/integration.json` is deliberately not called, not even as
-   * a fallback. inFakt switched the KSeF 1.0 namespace off for every account, so
-   * it now answers "API KSeF 1.0 zostalo wylaczone. Prosze przejsc na KSeF 2.0."
-   * rather than a status - which, read through a fail-closed guard, stopped the
-   * whole invoicing run. `/ksef2/` also needs the looser scope of the two
+   * a fallback. inFakt switched the KSeF 1.0 namespace off for every account
+   * when the Ministry of Finance retired KSeF 1.0 (last usable 2026-01-25), so
+   * it now answers HTTP 410 Gone with "API KSeF 1.0 zostalo wylaczone. Prosze
+   * przejsc na KSeF 2.0." rather than a status - which, read through a
+   * fail-closed guard, stopped the whole invoicing run. The 410 carries no
+   * `Sunset` or `Deprecation` header, so there is nothing to detect it by other
+   * than the status. `/ksef2/` also needs the looser scope of the two
    * (`api:invoices:read`, not `api:ksef:integration:write`), so an API key
    * scoped for invoicing alone can read it (github.com/infakt/API ksef.md).
    *
