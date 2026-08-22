@@ -573,6 +573,38 @@ export default class InfaktModuleService extends MedusaService({
   }
 
   /**
+   * The queued row for ONE order, if it is due right now.
+   *
+   * Deliberately `listDueInvoices` with an `order_id` filter bolted on, sharing
+   * the exact same due-predicate. The payment subscriber uses it to invoice the
+   * order whose money just landed without waiting for the next cron tick, and it
+   * must not be able to touch a row the cron would have left alone: `done`,
+   * `skipped` and `needs_review` are just as terminal here, and a row deferred
+   * into the future (awaiting full payment, or riding inFakt's async create task)
+   * is just as invisible.
+   *
+   * That shared predicate is the point. If this query were any looser, the
+   * "invoice immediately" path would become a way to re-enter rows that the state
+   * machine had deliberately parked - including a needs_review row, whose whole
+   * purpose is that only an operator restarts it.
+   *
+   * Returns at most one row: `order_id` is unique on the table.
+   */
+  async listDueInvoicesForOrder(orderId: string): Promise<Record<string, unknown>[]> {
+    return rawRows<Record<string, unknown>>(
+      await this.getRawSql().raw(
+        `select * from "${INVOICE_TABLE}"
+          where "deleted_at" is null
+            and "order_id" = ?
+            and "status" in ('pending', 'processing')
+            and ("next_attempt_at" is null or "next_attempt_at" <= ?)
+          limit 1`,
+        [orderId, new Date()],
+      ),
+    );
+  }
+
+  /**
    * Idempotently add an order to the invoicing queue.
    *
    * `order_id` is unique, so a second call for the same order is a no-op rather

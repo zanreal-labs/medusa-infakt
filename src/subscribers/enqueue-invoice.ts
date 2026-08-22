@@ -1,22 +1,28 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
 import type { Logger } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { runInvoicing } from "../lib/invoicing/run";
 import { orderIdForPayment } from "../lib/invoicing/trigger";
 import type { GraphQuery } from "../lib/invoicing/trigger";
 import { INFAKT_MODULE } from "../modules/infakt";
 import type InfaktModuleService from "../modules/infakt/service";
 
 /**
- * Admission to the invoicing queue.
+ * Admission to the invoicing queue - and, immediately afterwards, the run that
+ * drains it. This is the PRIMARY path to an issued invoice; the cron in
+ * `src/jobs/infakt-invoicing.ts` is the safety net behind it.
  *
- * This subscriber does exactly one thing: create a row saying "this order will be
- * invoiced". It never builds a payload, never calls inFakt, and never decides
- * whether the order is ready.
+ * The handler still does exactly one thing of its own: create a row saying "this
+ * order will be invoiced". It never builds a payload, never calls inFakt, and
+ * never decides whether the order is ready. What it does after enqueueing is ask
+ * the shared runner (`src/lib/invoicing/run.ts`) to advance that one row now,
+ * which is the same code the cron runs - not a second, faster implementation of
+ * it.
  *
  * That division is the point. Event delivery is at-most-once and can arrive
  * early, late, or more than once; issuing an invoice is irreversible. So the
  * event only records intent, and the worker - which is idempotent, restartable and
- * re-reads live state on every tick - owns every consequential decision:
+ * re-reads live state on every run - owns every consequential decision:
  *
  *  - Whether the order is fully paid (`payment.captured` fires per capture, and an
  *    order can be captured in parts).
@@ -81,6 +87,65 @@ export default async function enqueueInvoiceSubscriber({
     // Not a warning: a re-delivered event and a second capture on the same order
     // both land here, and both are the unique constraint doing its job.
     logger.debug?.(`[medusa-infakt] order ${orderId} is already queued for invoicing.`);
+  }
+
+  await issueNow(container, logger, orderId);
+}
+
+/**
+ * Advance this order's row right now, instead of leaving it for the next cron
+ * tick.
+ *
+ * This is the whole latency win, and it is deliberately not a shortcut: it runs
+ * `runInvoicing`, the exact function the cron runs, narrowed to one order. Every
+ * guard therefore still applies, in the same order - the enablement gate, the
+ * atomic single-flight claim, the KSeF readiness refusal, the crash-window check
+ * that writes `submit_started_at` before the create, and the state machine's
+ * terminal statuses.
+ *
+ * ## Racing the cron is safe, and is handled one level down
+ *
+ * A cron tick and this handler can fire on the same row at the same moment. They
+ * cannot both process it, because `claimRun` is a single conditional UPDATE and
+ * the loser gets zero rows back and returns without running. Whichever loses
+ * simply does not run; the row it wanted is still due, and the winner either
+ * finishes it or leaves it exactly as its persisted columns say it is.
+ *
+ * Nothing here re-implements that. Adding a second guard in the subscriber would
+ * be a second thing to keep correct, and the one in the module is the one that is
+ * atomic in the database.
+ *
+ * ## Why every failure is swallowed
+ *
+ * A throwing subscriber is retried by the event bus with no bound and no
+ * visibility, and the retry would re-enter a pipeline whose whole safety argument
+ * rests on being re-entered deliberately. The cron IS the designed retry: the row
+ * is already persisted as pending, so the worst case of a failure here is the
+ * five-minute wait this path exists to avoid, which is exactly where the plugin
+ * was before.
+ *
+ * A KSeF-not-ready refusal lands here too, and that is intended: the refusal
+ * stands, the row stays queued, and the cron picks it up once an operator has
+ * fixed the integration.
+ */
+async function issueNow(
+  container: SubscriberArgs["container"],
+  logger: Logger,
+  orderId: string,
+): Promise<void> {
+  try {
+    const summary = await runInvoicing(container, { orderId, source: "medusa-infakt/on-capture" });
+    if (summary.skipped) {
+      logger.debug?.(
+        `[medusa-infakt] did not invoice order ${orderId} immediately (${summary.skipped}); the worker will pick it up.`,
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      `[medusa-infakt] could not invoice order ${orderId} immediately: ${
+        error instanceof Error ? error.message : String(error)
+      }. The order stays queued and the invoicing worker will retry it.`,
+    );
   }
 }
 

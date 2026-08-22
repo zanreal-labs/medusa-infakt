@@ -57,7 +57,9 @@ Wszystkie trzy opisuje [Ustawienia i API panelu](./settings.pl.mdx).
   payment.captured  ->  subscriber dopisuje wiersz (status: pending)
                              |
                              v
-   tik workera (co 5 minut, INFAKT_WORKER_CRON)
+   ten sam subscriber od razu uruchamia pipeline dla tego zamówienia
+   (tik workera - co 5 minut, INFAKT_WORKER_CRON - jest siatką
+    bezpieczeństwa, która ponawia to, czego nie udało się dokończyć)
                              |
                     bramki: już zafakturowane? sprzed startDate?
                             zła waluta? anulowane? opłacone w całości?

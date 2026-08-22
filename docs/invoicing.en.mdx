@@ -141,7 +141,7 @@ validation dump can be kilobytes long.
 
 | What | Interval |
 | --- | --- |
-| Worker schedule | `*/5 * * * *`, override with `INFAKT_WORKER_CRON` |
+| Worker schedule | `*/5 * * * *`, override with `INFAKT_WORKER_CRON`. The safety net - a paid order is invoiced immediately on `payment.captured`. |
 | Re-check while inFakt or KSeF are still processing | 2 minutes |
 | Re-check while the order is not yet fully paid | 30 minutes |
 | First retry after a failure | 10 minutes, doubling to a 6 hour cap |

@@ -284,7 +284,7 @@ different day than it reads as.
 
 | Variable                    | Default       | Effect                                                                 |
 | --------------------------- | ------------- | ---------------------------------------------------------------------- |
-| `INFAKT_WORKER_CRON`        | `*/5 * * * *` | Cron schedule for the worker job.                                      |
+| `INFAKT_WORKER_CRON`        | `*/5 * * * *` | Cron schedule for the worker job. A reconciliation interval, not a latency budget: a paid order is invoiced immediately by the `payment.captured` subscriber, and this tick retries whatever that could not finish. |
 | `INFAKT_INVOICING_DISABLED` | unset         | `1`/`true`/`yes` force-disables invoicing, overriding everything else. |
 
 **Why the cron is not an option.** Medusa evaluates a scheduled job's `config.schedule`

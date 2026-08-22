@@ -117,7 +117,7 @@ database, with a message naming the option.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Worker schedule. An env var rather than an option because Medusa reads a job's `config.schedule` before the container exists. |
+| `INFAKT_WORKER_CRON` | `*/5 * * * *` | Worker schedule. An env var rather than an option because Medusa reads a job's `config.schedule` before the container exists. This is the safety net's interval, not the time a buyer waits: the `payment.captured` subscriber issues the invoice immediately. |
 | `INFAKT_INVOICING_DISABLED` | unset | Hard force-off. See above. |
 
 ## Admin API
