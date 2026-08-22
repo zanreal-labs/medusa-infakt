@@ -1,5 +1,5 @@
 import type { InvoiceBuyerInput, InvoiceOrderInput } from "./builder";
-import { bigNumberToMinorUnits } from "./money";
+import { bigNumberToMinorUnits, bigNumberToQuantity } from "./money";
 import type { NipExtractorOrder } from "./nip";
 
 /**
@@ -121,7 +121,8 @@ export function toInvoiceOrderInput(
     items: (order.items ?? []).map((item) => ({
       grossTotal: minorToMajor(bigNumberToMinorUnits(item.total)),
       name: lineItemName(item),
-      quantity: item.quantity,
+      // `quantity` is a BigNumber off `query.graph`, same as the money columns.
+      quantity: bigNumberToQuantity(item.quantity) ?? Number.NaN,
       // Only consulted when grossTotal is null (an order read without totals).
       unitPrice: minorToMajor(bigNumberToMinorUnits(item.unit_price)),
     })),

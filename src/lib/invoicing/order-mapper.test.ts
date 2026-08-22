@@ -356,3 +356,38 @@ describe("mapper plus builder, end to end", () => {
     expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("does not match") });
   });
 });
+
+describe("BigNumber quantity off query.graph", () => {
+  // The shape `query.graph` returns for numeric order columns: a BigNumber
+  // instance, not a number. Reconstructed to pin the contract, not a Medusa
+  // version - same approach as medusa-allegro's parseAmount regression test.
+  class FakeBigNumber {
+    constructor(private readonly decimal: string) {}
+    get numeric(): number {
+      return Number.parseFloat(this.decimal);
+    }
+    get raw(): { value: string; precision: number } {
+      return { precision: 20, value: this.decimal };
+    }
+    valueOf(): number {
+      return this.numeric;
+    }
+  }
+
+  it("maps instance quantities and totals to the plain values the builder validates", () => {
+    const order = medusaOrder({
+      items: [
+        {
+          product_title: "Program antywirusowy",
+          quantity: new FakeBigNumber("1") as never,
+          total: new FakeBigNumber("206.00") as never,
+          unit_price: new FakeBigNumber("206.00") as never,
+        },
+      ],
+      total: new FakeBigNumber("206.00") as never,
+    });
+    const mapped = toInvoiceOrderInput(order);
+    expect(mapped.items[0]?.quantity).toBe(1);
+    expect(mapped.items[0]?.grossTotal).toBe(206);
+  });
+});

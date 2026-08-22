@@ -165,3 +165,28 @@ export function isCalendarDate(value: unknown): value is string {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
+
+/**
+ * Read a quantity the same way `bigNumberToMinorUnits` reads an amount, but
+ * as a bare count: no minor-unit scaling, no rounding. `order_item.quantity`
+ * comes back from `query.graph` as a BigNumber instance exactly like the
+ * money columns do, and the invoice builder's `Number.isInteger(quantity)`
+ * check rejected the instance outright - which parked today's first live
+ * invoice in needs_review with "invalid price or quantity" while the value
+ * inside was a perfectly good 1.
+ */
+export function bigNumberToQuantity(value?: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  // Reuse the money unwrap, then undo its one deliberate transformation.
+  const minor = bigNumberToMinorUnits(value);
+  return minor === null ? null : minor / 100;
+}
