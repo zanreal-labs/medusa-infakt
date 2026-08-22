@@ -367,22 +367,27 @@ export class InfaktClient {
   // ---------- KSeF ----------
 
   /**
-   * POST /invoices/{uuid}/send_to_ksef.json - submit the invoice to KSeF.
+   * POST /ksef2/documents/{uuid}/send.json - submit the invoice to KSeF.
    *
    * Sent with no body (the optional `inform_via_email` block is not used - the
    * plugin does not email buyers on the merchant's behalf). Track progress via
    * `getKsefStatus`. Returns HTTP 422 when the account has no active KSeF
    * integration, and also when the invoice was already submitted.
+   *
+   * The per-resource alias `POST /invoices/{uuid}/send_to_ksef.json` is
+   * documented as behaving "identically to the universal `/ksef/documents/`"
+   * endpoint - i.e. it routes into the KSeF 1.0 namespace inFakt has switched
+   * off. Only the `/ksef2/` form is used here.
    */
   async sendToKsef(uuid: string): Promise<void> {
-    await this.request("POST", `/invoices/${encodeURIComponent(uuid)}/send_to_ksef.json`);
+    await this.request("POST", `/ksef2/documents/${encodeURIComponent(uuid)}/send.json`);
   }
 
-  /** GET /ksef/documents/{uuid}/status.json - poll the KSeF submission. */
+  /** GET /ksef2/documents/{uuid}/status.json - poll the KSeF submission. */
   async getKsefStatus(uuid: string): Promise<InfaktKsefStatus> {
     const raw = await this.request<KsefStatusResponse>(
       "GET",
-      `/ksef/documents/${encodeURIComponent(uuid)}/status.json`,
+      `/ksef2/documents/${encodeURIComponent(uuid)}/status.json`,
     );
     return {
       ksefNumber: raw.ksef_number ?? undefined,
@@ -393,28 +398,30 @@ export class InfaktClient {
   }
 
   /**
-   * GET /ksef/integration.json - is the account's KSeF integration live?
+   * GET /ksef2/integration.json - is the account's KSeF integration live?
    *
-   * Falls back to `/ksef2/integration.json` when the legacy namespace answers
-   * 403/404. The two namespaces need different scopes - the legacy one wants
-   * `api:ksef:integration:write`, KSeF 2.0 only `api:invoices:read` - so an API
-   * key scoped for invoicing alone can read the status from `/ksef2/` while
-   * being refused by `/ksef/` (github.com/infakt/API ksef.md).
+   * This is the readiness probe behind `ksef.requireActive`: it answers "will an
+   * invoice created now actually reach KSeF?" before the worker creates one.
+   *
+   * The legacy `/ksef/integration.json` is deliberately not called, not even as
+   * a fallback. inFakt switched the KSeF 1.0 namespace off for every account
+   * when the Ministry of Finance retired KSeF 1.0 (last usable 2026-01-25), so
+   * it now answers HTTP 410 Gone with "API KSeF 1.0 zostalo wylaczone. Prosze
+   * przejsc na KSeF 2.0." rather than a status - which, read through a
+   * fail-closed guard, stopped the whole invoicing run. The 410 carries no
+   * `Sunset` or `Deprecation` header, so there is nothing to detect it by other
+   * than the status. `/ksef2/` also needs the looser scope of the two
+   * (`api:invoices:read`, not `api:ksef:integration:write`), so an API key
+   * scoped for invoicing alone can read it (github.com/infakt/API ksef.md).
+   *
+   * Errors are not swallowed: they propagate, and `verifyKsefIntegration` turns
+   * them into `{ active: false, error }` so an unreadable status still refuses
+   * the run rather than waving invoices through.
    */
   async getKsefIntegration(): Promise<InfaktKsefIntegration> {
-    try {
-      return this.mapKsefIntegration(
-        await this.request<KsefIntegrationResponse>("GET", "/ksef/integration.json"),
-      );
-    } catch (error) {
-      const status = error instanceof InfaktApiError ? error.httpStatus : 0;
-      if (status !== 403 && status !== 404) {
-        throw error;
-      }
-      return this.mapKsefIntegration(
-        await this.request<KsefIntegrationResponse>("GET", "/ksef2/integration.json"),
-      );
-    }
+    return this.mapKsefIntegration(
+      await this.request<KsefIntegrationResponse>("GET", "/ksef2/integration.json"),
+    );
   }
 
   private mapKsefIntegration(raw: KsefIntegrationResponse | undefined): InfaktKsefIntegration {

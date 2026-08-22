@@ -277,7 +277,7 @@ describe("InfaktClient", () => {
     const fetchImpl = stubFetch(() => apiJson(200, { status: "sent" }));
     const client = new InfaktClient({ apiKey: "KEY" });
     await client.sendToKsef("u-1");
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/invoices/u-1/send_to_ksef.json");
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/ksef2/documents/u-1/send.json");
     const init = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
     expect(init?.method).toBe("POST");
     expect(init?.body).toBeUndefined();
@@ -296,7 +296,7 @@ describe("InfaktClient", () => {
     );
     const client = new InfaktClient({ apiKey: "KEY" });
     const status = await client.getKsefStatus("u-1");
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/ksef/documents/u-1/status.json");
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/ksef2/documents/u-1/status.json");
     expect(status).toEqual({
       ksefNumber: "7343521162-20231004-47A70D8BD670-57",
       requestUuid: "d34279dc-b1a1-4852-b475-eb36c335992f",
@@ -320,7 +320,7 @@ describe("InfaktClient", () => {
     expect(status.ksefNumber).toBeUndefined();
   });
 
-  it("getKsefIntegration reads the legacy /ksef/ namespace", async () => {
+  it("getKsefIntegration reads the KSeF 2.0 namespace, in one request", async () => {
     const fetchImpl = stubFetch(() =>
       apiJson(200, {
         active: true,
@@ -334,23 +334,43 @@ describe("InfaktClient", () => {
       costsLastFetchedAt: undefined,
       incomesLastFetchedAt: "2024-12-01T10:00:00+01:00",
     });
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/ksef/integration.json");
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "https://api.infakt.pl/api/v3/ksef2/integration.json",
+    );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("getKsefIntegration falls back to /ksef2/ when the legacy scope is refused", async () => {
+  /**
+   * The outage regression. The probe used to ask `/ksef/integration.json` first
+   * and only fall back to `/ksef2/` on 403/404; the retired namespace answers
+   * 410 Gone, so the fallback never fired and the readiness check threw on every
+   * run - which, being fail-closed, stopped invoicing altogether. The 410 body
+   * below is the live response, verbatim apart from the diacritics this file
+   * avoids.
+   */
+  it("getKsefIntegration never touches the retired KSeF 1.0 namespace", async () => {
     const fetchImpl = stubFetch((url) =>
       String(url).includes("/ksef2/")
         ? apiJson(200, { active: true })
-        : apiJson(403, { error: "Brak uprawnien." }),
+        : apiJson(410, {
+            error: "API KSeF 1.0 zostalo wylaczone. Prosze przejsc na KSeF 2.0.",
+          }),
     );
-    const client = new InfaktClient({ apiKey: "KEY" });
-    await expect(client.getKsefIntegration()).resolves.toMatchObject({ active: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(String(fetchImpl.mock.calls[1]?.[0])).toContain("/ksef2/integration.json");
+    await expect(new InfaktClient({ apiKey: "KEY" }).getKsefIntegration()).resolves.toMatchObject({
+      active: true,
+    });
+    const urls = fetchImpl.mock.calls.map((call) => String(call[0]));
+    expect(urls.some((url) => /\/ksef\/integration\.json$/u.test(url))).toBe(false);
   });
 
-  it("getKsefIntegration does not fall back on a non-scope failure", async () => {
+  it("getKsefIntegration reports the account as not integrated", async () => {
+    stubFetch(() => apiJson(200, { active: false }));
+    await expect(new InfaktClient({ apiKey: "KEY" }).getKsefIntegration()).resolves.toMatchObject({
+      active: false,
+    });
+  });
+
+  it("getKsefIntegration surfaces a failed probe rather than answering active", async () => {
     const fetchImpl = stubFetch(() => apiJson(500, { error: "Blad serwera." }));
     await expect(new InfaktClient({ apiKey: "KEY" }).getKsefIntegration()).rejects.toMatchObject({
       httpStatus: 500,

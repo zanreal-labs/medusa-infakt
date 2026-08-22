@@ -5,11 +5,12 @@ import { INFAKT_MODULE } from "../modules/infakt";
 import infaktInvoicingJob from "./infakt-invoicing";
 
 /**
- * Only the enablement gate at the top of the job. The rest of the run (claiming,
- * draining due rows, KSeF readiness) is covered by `claim-logic.test.ts` and
- * `pipeline.test.ts` - what is not covered anywhere else is that the job asks
- * for the CURRENT effective enablement on every tick and refuses to go any
- * further when it says no, regardless of which of the three reasons applies.
+ * The job's own gates. Claiming and per-row processing are covered by
+ * `claim-logic.test.ts` and `pipeline.test.ts`; what only exists here is the
+ * order of the gates - the job asks for the CURRENT effective enablement on
+ * every tick and refuses to go any further when it says no, regardless of which
+ * of the three reasons applies, and then refuses again when KSeF is required but
+ * the account is not ready (see "the KSeF readiness gate" at the bottom).
  */
 
 const logger = () => ({ debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() });
@@ -205,5 +206,138 @@ describe("infaktInvoicingJob: the needs_review alert", () => {
       expect.objectContaining({ id: "inv_1", status: "needs_review" }),
     );
     expect(releaseRun).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The KSeF readiness gate (`ensureKsefReady`).
+ *
+ * `ksef.requireActive` is fail-closed on purpose: the run refuses outright rather
+ * than letting B2B rows pile up in `needs_review` while a filing deadline passes.
+ * That makes the probe itself load-bearing - a probe that cannot answer must
+ * refuse, and a probe that answers "active" must let the run through. inFakt
+ * retiring the KSeF 1.0 namespace turned every probe into an error, so these
+ * decisions are pinned here rather than left to the client tests alone.
+ */
+const ksefHarness = (opts: {
+  verify?: unknown;
+  runState?: Record<string, unknown>;
+  requireActive?: boolean;
+}) => {
+  const log = logger();
+  const releaseRun = vi.fn().mockResolvedValue(true);
+  const listDueInvoices = vi.fn().mockResolvedValue([]);
+  const verifyKsefIntegration =
+    opts.verify === undefined
+      ? vi.fn().mockResolvedValue({ active: true })
+      : (opts.verify as ReturnType<typeof vi.fn>);
+  const infakt = {
+    claimRun: vi.fn().mockResolvedValue({ acquired: true, token: "tok" }),
+    getApiClient: vi.fn().mockResolvedValue({}),
+    getEffectiveEnablement: vi.fn().mockResolvedValue({ effectiveEnabled: true, reason: "active" }),
+    getEffectiveOptions: vi.fn().mockResolvedValue({
+      currency: "PLN",
+      emitIssuedEvent: true,
+      ksefMode: "nip-only",
+      ksefPossible: true,
+      ksefRequireActive: opts.requireActive ?? true,
+      nipExtractor: () => {},
+      taxSymbol: "23",
+    }),
+    getRunState: vi.fn().mockResolvedValue(opts.runState ?? {}),
+    listDueInvoices,
+    releaseRun,
+    verifyKsefIntegration,
+  };
+  const container = {
+    resolve: (key: string) => {
+      if (key === ContainerRegistrationKeys.LOGGER) {
+        return log;
+      }
+      if (key === INFAKT_MODULE) {
+        return infakt;
+      }
+      throw new Error(`unexpected resolve(${key})`);
+    },
+  } as unknown as MedusaContainer;
+  return { container, listDueInvoices, log, releaseRun, verifyKsefIntegration };
+};
+
+describe("infaktInvoicingJob: the KSeF readiness gate", () => {
+  it("drains the queue when the probe says the integration is active", async () => {
+    const { container, listDueInvoices, releaseRun } = ksefHarness({
+      verify: vi.fn().mockResolvedValue({
+        active: true,
+        costsLastFetchedAt: "2026-08-21T22:48:56.949+02:00",
+      }),
+    });
+
+    await expect(infaktInvoicingJob(container)).resolves.toBeUndefined();
+
+    expect(listDueInvoices).toHaveBeenCalledTimes(1);
+    expect(releaseRun).toHaveBeenCalledWith("tok", expect.objectContaining({ status: "ok" }));
+  });
+
+  it("refuses the whole run when the account is not integrated with KSeF", async () => {
+    const { container, listDueInvoices, log, releaseRun } = ksefHarness({
+      verify: vi.fn().mockResolvedValue({ active: false }),
+    });
+
+    await expect(infaktInvoicingJob(container)).rejects.toThrow(/KSeF is required but not ready/u);
+
+    // No invoice is created: the queue is never even read.
+    expect(listDueInvoices).not.toHaveBeenCalled();
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining("REFUSING TO RUN"));
+    expect(releaseRun).toHaveBeenCalledWith("tok", expect.objectContaining({ status: "error" }));
+  });
+
+  it("refuses the run when the probe itself fails, rather than assuming it is fine", async () => {
+    const { container, listDueInvoices, log } = ksefHarness({
+      verify: vi.fn().mockResolvedValue({
+        active: false,
+        error: "API KSeF 1.0 zostalo wylaczone. Prosze przejsc na KSeF 2.0.",
+      }),
+    });
+
+    await expect(infaktInvoicingJob(container)).rejects.toThrow(/the check itself failed/u);
+
+    expect(listDueInvoices).not.toHaveBeenCalled();
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining("the check itself failed"));
+  });
+
+  it("skips the probe entirely when KSeF can never be required", async () => {
+    const { container, listDueInvoices, verifyKsefIntegration } = ksefHarness({
+      requireActive: false,
+      verify: vi.fn(),
+    });
+
+    await expect(infaktInvoicingJob(container)).resolves.toBeUndefined();
+
+    expect(verifyKsefIntegration).not.toHaveBeenCalled();
+    expect(listDueInvoices).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses a recent active answer instead of probing on every tick", async () => {
+    const { container, listDueInvoices, verifyKsefIntegration } = ksefHarness({
+      runState: { ksef_active: true, ksef_checked_at: new Date() },
+      verify: vi.fn(),
+    });
+
+    await expect(infaktInvoicingJob(container)).resolves.toBeUndefined();
+
+    expect(verifyKsefIntegration).not.toHaveBeenCalled();
+    expect(listDueInvoices).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-probes immediately while the last answer was inactive", async () => {
+    const verify = vi.fn().mockResolvedValue({ active: true });
+    const { container, verifyKsefIntegration } = ksefHarness({
+      runState: { ksef_active: false, ksef_checked_at: new Date() },
+      verify,
+    });
+
+    await expect(infaktInvoicingJob(container)).resolves.toBeUndefined();
+
+    expect(verifyKsefIntegration).toHaveBeenCalledTimes(1);
   });
 });
