@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { sdk } from "../lib/sdk";
+import { buildInvoiceTimeline } from "../lib/timeline";
 import type {
   InfaktInvoiceRow,
   InfaktSettings,
@@ -447,6 +448,8 @@ const RowDetail = ({
 
       <PdfLink row={row} />
 
+      <HistorySection row={row} />
+
       {detail ? (
         <Text className="text-ui-fg-subtle" size="small">
           {detail}
@@ -457,6 +460,46 @@ const RowDetail = ({
       ) : null}
 
       <RowActions busy={busy} onAct={onAct} row={row} />
+    </div>
+  );
+};
+
+/**
+ * The order's invoicing milestones, in the order they happened - "Faktura ...
+ * wystawiona", then, when it was filed, "Wysłano do KSeF".
+ *
+ * This is the plugin's answer to a hard constraint: the native Medusa 2.18 order
+ * Activity timeline is a closed set (payments, fulfillments and a fixed list of
+ * order-change types) that never renders a plugin's entries, so issuance and KSeF
+ * filing are surfaced here, on the plugin's own widget, from the row already
+ * loaded. `buildInvoiceTimeline` is pure and stably keyed (see `lib/timeline.ts`),
+ * so this renders nothing at all until there is a genuinely issued invoice.
+ */
+const HistorySection = ({ row }: { row: InfaktInvoiceRow }) => {
+  const { t } = useTranslation();
+  const entries = buildInvoiceTimeline(row, (key, defaultValue, options) =>
+    t(key, defaultValue, options),
+  );
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <div className="flex flex-col gap-y-1">
+      <Text className="text-ui-fg-muted txt-compact-small" weight="plus">
+        {t("infakt.orderWidget.history.heading", "History")}
+      </Text>
+      <ul className="flex flex-col gap-y-1">
+        {entries.map((entry) => (
+          <li className="flex flex-wrap items-baseline justify-between gap-x-4" key={entry.key}>
+            <Text className="txt-compact-small" size="small">
+              {entry.title}
+            </Text>
+            <Text className="text-ui-fg-subtle txt-compact-small" size="small">
+              {formatDate(entry.timestamp)}
+            </Text>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 };

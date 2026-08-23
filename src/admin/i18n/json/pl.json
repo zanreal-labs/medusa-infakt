@@ -43,6 +43,13 @@
         "issuedOn": "Wystawiono"
       },
       "crashWindowDetail": "Poprzednia próba wystawienia mogła dotrzeć do inFakt. Sprawdź, czy nie powstała tam osierocona faktura, a następnie powiąż ją lub wyczyść ten zapis.",
+      "history": {
+        "heading": "Historia",
+        "invoiceIssued": "Faktura {{number}} wystawiona",
+        "numberPending": "(numer w trakcie nadawania)",
+        "ksefFiled": "Wysłano do KSeF",
+        "ksefFiledDetail": "Wysłano do KSeF: {{detail}}"
+      },
       "issuedNumberPending": "wystawiona (numer w trakcie nadawania)",
       "buyerCompany": "firma (B2B)",
       "buyerConsumer": "konsument",
