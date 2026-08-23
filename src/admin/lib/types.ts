@@ -44,6 +44,8 @@ export interface InfaktInvoiceRow {
   ksef_decision_reason?: string | null;
   ksef_number?: string | null;
   ksef_status?: string | null;
+  /** Written before the KSeF submit; the "left for KSeF" time the history reads. */
+  ksef_sent_at?: string | null;
   submit_started_at?: string | null;
   task_reference?: string | null;
   attempts: number;

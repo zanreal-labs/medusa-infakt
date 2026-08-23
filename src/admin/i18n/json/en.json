@@ -43,6 +43,13 @@
         "issuedOn": "Issued on"
       },
       "crashWindowDetail": "A previous attempt may have reached inFakt. Look for a stray invoice there, then link it or clear this one.",
+      "history": {
+        "sideHeading": "Invoice history",
+        "invoiceIssued": "Invoice {{number}} issued",
+        "numberPending": "(number pending)",
+        "ksefFiled": "Sent to KSeF",
+        "ksefFiledDetail": "Sent to KSeF: {{detail}}"
+      },
       "issuedNumberPending": "issued (number pending)",
       "buyerCompany": "company (B2B)",
       "buyerConsumer": "consumer",
