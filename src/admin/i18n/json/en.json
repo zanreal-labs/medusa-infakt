@@ -44,7 +44,7 @@
       },
       "crashWindowDetail": "A previous attempt may have reached inFakt. Look for a stray invoice there, then link it or clear this one.",
       "history": {
-        "heading": "History",
+        "sideHeading": "Invoice history",
         "invoiceIssued": "Invoice {{number}} issued",
         "numberPending": "(number pending)",
         "ksefFiled": "Sent to KSeF",
