@@ -2,7 +2,17 @@
  * Money and calendar helpers shared by the builder, the paid gate and the
  * matching engine. Pure and dependency-free, so every rule here is unit-tested
  * without a database or an HTTP mock.
+ *
+ * The BigNumber-unwrapping half of `bigNumberToMinorUnits` (recognising a
+ * Medusa `BigNumber` instance, a bare `{ value, precision }` shape, or a
+ * detached instance that lost its prototype) lives in `./big-number`, shared
+ * byte-for-byte with medusa-allegro and medusa-marken - see that file's
+ * header for the vendoring contract. This module keeps what is genuinely
+ * infakt-specific: minor-unit conversion, the "does this even look like a
+ * BigNumber" gate (a `Date`'s `valueOf()` also happens to return a number,
+ * and is not an amount), and the calendar helpers.
  */
+import { type BigNumberInput, bigNumberCandidates } from "./big-number";
 
 /**
  * Major units (e.g. 133.44 PLN) to integer minor units (13344 grosze).
@@ -31,18 +41,19 @@ export function toMinorUnits(value?: number | string | null): number | null {
 }
 
 /**
- * The public surface this module reads a Medusa `BigNumber` through.
- *
- * Declared structurally rather than importing the class: this file is pure and
- * dependency-free so its rules can be unit-tested without a framework, and a
- * money field also has to survive read paths that hand back a plain object
- * rather than a live instance.
+ * The public surface this module reads a Medusa `BigNumber` through, used
+ * only to decide whether an object is worth reading at all - see
+ * `looksLikeBigNumber` below. The actual candidate extraction (public
+ * accessors, bare raw shape, detached private fields, string coercion) is
+ * shared with medusa-allegro and medusa-marken - see `./big-number`.
  */
 interface BigNumberLike {
-  /** Public getter. Its presence is what identifies an object as a BigNumber. */
+  /** Public getter. Its presence is one of the signals that identify an object as a BigNumber. */
   numeric?: unknown;
   /** Public getter, `{ value, precision }`. */
   raw?: unknown;
+  /** The raw shape passed directly, which is how a serialized big number arrives. */
+  value?: unknown;
   valueOf?: () => unknown;
 }
 
@@ -59,6 +70,32 @@ function rawValueOf(raw: unknown): number | string | null | undefined {
 }
 
 /**
+ * Does this object identify itself as a BigNumber - live, bare, or a
+ * detached instance that lost its prototype - before its `valueOf()` /
+ * `toString()` coercion is trusted for anything?
+ *
+ * This is the one thing the shared `bigNumberCandidates` deliberately leaves
+ * to the caller (see that file's header): it is what stops a `Date`, whose
+ * `valueOf()` also happens to return a number, from being read as an amount.
+ * `Number([])` is 0 and `Number({})` is NaN, so coercing blindly would turn
+ * junk into an amount - each shape is instead recognised explicitly first.
+ *
+ * medusa-allegro and medusa-marken do not apply this gate: they lean on
+ * their own numeric parsers to reject the resulting garbage instead. This
+ * module's `toMinorUnits` is permissive (`Number.parseFloat`, no strict
+ * format validation), so it needs the gate to do that rejection up front.
+ */
+function looksLikeBigNumber(value: BigNumberLike & { raw_?: unknown; numeric_?: unknown }): boolean {
+  return (
+    typeof value.numeric === "number" ||
+    rawValueOf(value.raw) !== undefined ||
+    value.value !== undefined ||
+    rawValueOf(value.raw_) !== undefined ||
+    typeof value.numeric_ === "number"
+  );
+}
+
+/**
  * Unwrap the shapes a Medusa `BigNumberValue` can take before converting.
  *
  * Depending on the read path, a money field comes back as a number, a numeric
@@ -66,17 +103,12 @@ function rawValueOf(raw: unknown): number | string | null | undefined {
  * what the query layer actually returns for `order.total` - a live `BigNumber`
  * INSTANCE. An instance carries no `value` key of its own: its own enumerable
  * keys are `numeric_`, `raw_` and `bignumber_`, and everything readable is on
- * the prototype. Reading `Number(instance)` would work by coercion, but
- * `Number([])` is 0 and `Number({})` is NaN, so coercing blindly would turn
- * junk into an amount; each shape is therefore recognised explicitly.
+ * the prototype.
  *
- * The instance is read through `valueOf()`, which is the class's own public
- * coercion contract (`toJSON`, `[Symbol.toPrimitive]` and the `numeric` getter
- * all resolve to the same number, and `numeric` is what `valueOf` delegates
- * to). Its private `numeric_` / `raw_` fields are consulted only as a last
- * resort, for an instance that lost its prototype crossing a serialization
- * boundary - a trailing underscore is not a contract, and preferring it over
- * `valueOf()` would mean re-deriving the number the class already derives.
+ * `looksLikeBigNumber` gates entry; `bigNumberCandidates` (shared) then reads
+ * the object in its order of authority - `raw.value` before the derived
+ * `numeric`, public accessors before the private `raw_`/`numeric_` fallback -
+ * and the first candidate `toMinorUnits` can actually parse wins.
  *
  * A shape this cannot read returns null, NEVER 0. Zero is a legitimate amount,
  * so "I could not read this" has to stay distinguishable from "this is worth
@@ -95,37 +127,16 @@ export function bigNumberToMinorUnits(value?: unknown): number | null {
   if (typeof value !== "object") {
     return null;
   }
+  if (!looksLikeBigNumber(value as BigNumberLike & { raw_?: unknown; numeric_?: unknown })) {
+    return null;
+  }
 
-  // A live BigNumber instance, read through its public accessors.
-  const candidate = value as BigNumberLike;
-  const raw = rawValueOf(candidate.raw);
-  if (typeof candidate.numeric === "number" || raw !== undefined) {
-    const numeric = candidate.valueOf?.();
-    if (typeof numeric === "number" || typeof numeric === "string") {
-      return toMinorUnits(numeric);
+  for (const candidate of bigNumberCandidates(value as BigNumberInput)) {
+    const minor = toMinorUnits(candidate);
+    if (minor !== null) {
+      return minor;
     }
-    return toMinorUnits(raw ?? null);
   }
-
-  // A bare `BigNumberRawValue`, e.g. the column as the DAL hands it over.
-  const bare = rawValueOf(value);
-  if (bare !== undefined) {
-    return toMinorUnits(bare);
-  }
-
-  // Last resort: a BigNumber flattened into a plain object (a spread, a
-  // structured clone, a workflow step result) keeps the private fields and
-  // loses every accessor above. `raw_` first, because that is the full-precision
-  // value the `numeric` getter itself prefers.
-  const detached = value as { numeric_?: unknown; raw_?: unknown };
-  const detachedRaw = rawValueOf(detached.raw_);
-  if (detachedRaw !== undefined) {
-    return toMinorUnits(detachedRaw);
-  }
-  if (typeof detached.numeric_ === "number") {
-    return toMinorUnits(detached.numeric_);
-  }
-
   return null;
 }
 
