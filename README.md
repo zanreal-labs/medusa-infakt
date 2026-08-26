@@ -4,6 +4,9 @@ Polish invoicing for Medusa v2. Issues an [inFakt](https://www.infakt.pl/) invoi
 every paid order and files the B2B ones to **KSeF**, Poland's national e-invoicing
 system.
 
+Full documentation, in English and Polish, is published at
+<https://zanreal.com/docs/oss/medusa-infakt> and authored in [`docs/`](./docs).
+
 Built against Medusa core `2.18.0`.
 
 The hard part of this integration is not the API calls. It is that **issuing an invoice
