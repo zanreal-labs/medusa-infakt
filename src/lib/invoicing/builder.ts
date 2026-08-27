@@ -105,6 +105,16 @@ export interface InvoiceOrderInput {
   shipping?: InvoiceShippingInput[];
 }
 
+/**
+ * The opening of the message this file writes when the buyer address is unusable.
+ *
+ * Exported because `re-arm.ts` matches on it to decide whether a parked row can be
+ * put back in the queue automatically. Keeping the constant here, beside the code
+ * that produces it, is what stops the two drifting: change the wording and the
+ * matcher follows, rather than silently ceasing to match.
+ */
+export const ADDRESS_INCOMPLETE_PREFIX = "buyer address is incomplete";
+
 export interface InvoiceBuyerInput {
   firstName?: string | null;
   lastName?: string | null;
@@ -301,7 +311,7 @@ function buildClientFields(
       city ? null : "city",
       postCode ? null : "postal_code",
     ].filter(Boolean);
-    return { reason: `buyer address is incomplete (missing: ${missing.join(", ")})` };
+    return { reason: `${ADDRESS_INCOMPLETE_PREFIX} (missing: ${missing.join(", ")})` };
   }
 
   const common = {
