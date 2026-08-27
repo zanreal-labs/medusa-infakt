@@ -69,7 +69,14 @@ export interface InfaktInvoicePayload {
   client_first_name?: string;
   client_last_name?: string;
   client_business_activity_kind?: "self_employed" | "other_business" | "private_person";
-  /** NIP digits. */
+  /**
+   * The buyer's tax identifier.
+   *
+   * Polish NIPs go here as bare digits. A foreign EU VAT id goes here in its
+   * prefixed form (`DE123456789`) - inFakt accepts that, and live invoices on
+   * this account already carry prefixed values such as `PL8990100726`, so the
+   * field is a tax-code field rather than a NIP-only one despite the name.
+   */
   client_tax_code?: string;
   client_street?: string;
   client_city?: string;
@@ -77,7 +84,96 @@ export interface InfaktInvoicePayload {
   /** ISO country code, e.g. "PL". */
   client_country?: string;
   client_email?: string;
+  /**
+   * Free-text annotation printed on the invoice.
+   *
+   * This is where a reverse-charge or export-of-services statement lives. inFakt
+   * has no dedicated field for either: its `oo` ("odwrotne obciazenie") rate
+   * symbol was withdrawn on 2019-11-01 along with the domestic reverse charge,
+   * and the account's live rate table confirms it is still expired. So the legal
+   * annotation that art. 106e ust. 1 pkt 18 requires is carried as text, and the
+   * rate itself is expressed as the `np` symbol on each line.
+   */
+  notes?: string;
+  /**
+   * `service` or `merchandise`. Documented by inFakt as applying to foreign
+   * invoices ("dla zagranicznych"), so it is set on every cross-border document
+   * and left alone domestically.
+   */
+  sale_type?: "service" | "merchandise";
   services: InfaktServicePayload[];
+}
+
+/**
+ * One line on an OSS invoice.
+ *
+ * Structurally different from `InfaktServicePayload` in the one way that
+ * matters: there is no `tax_symbol`. An OSS line carries `tax_rate`, the
+ * destination member state's own rate, sourced from inFakt's
+ * `/moss_vat_rates.json`. A Polish rate symbol would be meaningless on a
+ * document that declares tax owed to another country.
+ */
+export interface InfaktOssServicePayload {
+  name: string;
+  quantity: number;
+  unit?: string;
+  /** Destination-country VAT rate, e.g. "19". Required by inFakt. */
+  tax_rate: string;
+  /** Net for the whole line, integer minor units. */
+  net_price?: number;
+  /** Net per unit, integer minor units. */
+  unit_net_price?: number;
+  /** Gross for the whole line, integer minor units. */
+  gross_price?: number;
+  /** VAT amount for the line, integer minor units. */
+  tax_price?: number;
+}
+
+/**
+ * Invoice body for `POST /async/oss_invoices.json`.
+ *
+ * A separate document family from the VAT invoice, not a variant of it: its own
+ * endpoint, its own field set, its own numbering. That last point is why this
+ * type exists behind an explicit opt-in - see `options.ts` and the PR body.
+ */
+export interface InfaktOssInvoicePayload {
+  /** Destination EU member state, never PL. */
+  country: string;
+  currency: string;
+  /** OSS is a B2C procedure; inFakt requires a natural person's name. */
+  client_first_name: string;
+  client_last_name: string;
+  client_email?: string;
+  client_street?: string;
+  client_city?: string;
+  client_post_code?: string;
+  /** `electronic` for software and license keys. */
+  service_type: "electronic" | "broadcasting" | "telecommunications";
+  sale_type: "service" | "merchandise";
+  /** inFakt requires a stated place of supply. */
+  service_place_primary: string;
+  /** YYYY-MM-DD */
+  issue_date?: string;
+  /** YYYY-MM-DD */
+  service_date?: string;
+  /** YYYY-MM-DD */
+  payment_date?: string;
+  notes?: string;
+  /** Totals, integer minor units. */
+  net_price?: number;
+  gross_price?: number;
+  tax_price?: number;
+  services: InfaktOssServicePayload[];
+}
+
+/** One row of `GET /moss_vat_rates.json`. */
+export interface InfaktMossRate {
+  id: number;
+  country: string;
+  /** Percentage as a number, e.g. 19. */
+  value: number;
+  /** True for a member state's reduced rate. */
+  reduced: boolean;
 }
 
 /** Accepted async task, returned by `POST /async/invoices.json` (HTTP 201/202). */

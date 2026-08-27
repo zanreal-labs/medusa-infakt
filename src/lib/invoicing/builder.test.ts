@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildInfaktInvoicePayload } from "./builder";
+import { EXPORT_SERVICES_NOTE, REVERSE_CHARGE_NOTE } from "./regime";
 import type {
   InvoiceBuilderConfig,
   InvoiceBuyerInput,
@@ -449,5 +450,167 @@ describe("buildInfaktInvoicePayload: rejection reasons never leak the NIP", () =
         }
       }
     }
+  });
+});
+
+describe("cross-border regimes", () => {
+  const eur: InvoiceBuilderConfig = { currency: "EUR", taxSymbol: "23" };
+  const eurOrder = () => order({ currency: "EUR" });
+
+  const deCompany: InvoiceBuyerInput = {
+    city: "Berlin",
+    companyName: "ACME GmbH",
+    countryCode: "DE",
+    postalCode: "10115",
+    street: "Hauptstrasse 1",
+    taxId: "DE123456789",
+  };
+
+  const reverseCharge = {
+    country: "DE",
+    kind: "reverse_charge",
+    note: REVERSE_CHARGE_NOTE,
+    taxSymbol: "np",
+    vatId: "DE123456789",
+    vatUeReportable: true,
+  } as const;
+
+  const exportServices = {
+    country: "US",
+    kind: "export_services",
+    note: EXPORT_SERVICES_NOTE,
+    taxSymbol: "np",
+    vatUeReportable: false,
+  } as const;
+
+  it("puts np on every line of a reverse-charge invoice, never 0", () => {
+    const result = unwrap(
+      buildInfaktInvoicePayload(eurOrder(), deCompany, { ...eur, regime: reverseCharge }),
+    );
+    expect(result.payload.services.every((service) => service.tax_symbol === "np")).toBe(true);
+  });
+
+  it("puts np on the shipping line too", () => {
+    const result = unwrap(
+      buildInfaktInvoicePayload(eurOrder(), deCompany, { ...eur, regime: reverseCharge }),
+    );
+    const shipping = result.payload.services.at(-1);
+    expect(shipping?.name).toContain("Dostawa");
+    expect(shipping?.tax_symbol).toBe("np");
+  });
+
+  it("carries the reverse-charge annotation", () => {
+    const result = unwrap(
+      buildInfaktInvoicePayload(eurOrder(), deCompany, { ...eur, regime: reverseCharge }),
+    );
+    expect(result.payload.notes).toBe(REVERSE_CHARGE_NOTE);
+    expect(result.payload.sale_type).toBe("service");
+  });
+
+  it("puts the prefixed VAT id on the invoice, not a stripped one", () => {
+    const result = unwrap(
+      buildInfaktInvoicePayload(eurOrder(), deCompany, { ...eur, regime: reverseCharge }),
+    );
+    expect(result.payload.client_tax_code).toBe("DE123456789");
+    expect(result.payload.client_business_activity_kind).toBe("other_business");
+    expect(result.payload.client_country).toBe("DE");
+  });
+
+  it("marks a foreign business as a company but records no Polish NIP", () => {
+    const result = unwrap(
+      buildInfaktInvoicePayload(eurOrder(), deCompany, { ...eur, regime: reverseCharge }),
+    );
+    // `isCompany` drives the KSeF decision, which the owner wants to include
+    // foreign buyers; `nip` stays undefined because a DE number is not a NIP.
+    expect(result.isCompany).toBe(true);
+    expect(result.nip).toBeUndefined();
+  });
+
+  it("no longer rejects a foreign VAT id as a malformed NIP", () => {
+    const result = buildInfaktInvoicePayload(eurOrder(), deCompany, {
+      ...eur,
+      regime: reverseCharge,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("gives an export of services the same np but a different annotation", () => {
+    const usCompany: InvoiceBuyerInput = {
+      ...deCompany,
+      countryCode: "US",
+      taxId: "12-3456789",
+    };
+    const result = unwrap(
+      buildInfaktInvoicePayload(eurOrder(), usCompany, { ...eur, regime: exportServices }),
+    );
+    expect(result.payload.services.every((service) => service.tax_symbol === "np")).toBe(true);
+    expect(result.payload.notes).toBe(EXPORT_SERVICES_NOTE);
+    expect(result.payload.notes).not.toBe(REVERSE_CHARGE_NOTE);
+  });
+
+  it("refuses a cross-border business invoice with no company name", () => {
+    const result = buildInfaktInvoicePayload(
+      eurOrder(),
+      { ...deCompany, companyName: null },
+      { ...eur, regime: reverseCharge },
+    );
+    expect(result).toMatchObject({ ok: false });
+    expect(!result.ok && result.reason).toContain("company name");
+  });
+
+  it("refuses to build an OSS sale, which is a different document family", () => {
+    const result = buildInfaktInvoicePayload(eurOrder(), deCompany, {
+      ...eur,
+      regime: { country: "DE", kind: "oss", rate: "19" },
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(!result.ok && result.reason).toContain("different document family");
+  });
+
+  it("surfaces a blocked regime's reason unchanged", () => {
+    const result = buildInfaktInvoicePayload(eurOrder(), deCompany, {
+      ...eur,
+      regime: { kind: "blocked", reason: "no OSS VAT rate is known for DE" },
+    });
+    expect(result).toMatchObject({ ok: false, reason: "no OSS VAT rate is known for DE" });
+  });
+
+  it("still enforces the total-match guard across a border", () => {
+    const result = buildInfaktInvoicePayload(order({ currency: "EUR", total: 200 }), deCompany, {
+      ...eur,
+      regime: reverseCharge,
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(!result.ok && result.reason).toContain("does not match order total");
+  });
+});
+
+describe("the domestic path is unchanged", () => {
+  it("produces an identical payload with no regime and with an explicit domestic one", () => {
+    const withoutRegime = unwrap(buildInfaktInvoicePayload(order(), company, config));
+    const withRegime = unwrap(
+      buildInfaktInvoicePayload(order(), company, {
+        ...config,
+        regime: { kind: "domestic", taxSymbol: "23" },
+      }),
+    );
+    expect(withRegime.payload).toEqual(withoutRegime.payload);
+  });
+
+  it("adds no notes and no sale_type to a domestic invoice", () => {
+    const result = unwrap(buildInfaktInvoicePayload(order(), company, config));
+    expect(result.payload.notes).toBeUndefined();
+    expect(result.payload.sale_type).toBeUndefined();
+  });
+
+  it("still keeps the Polish rate symbol domestically", () => {
+    const result = unwrap(buildInfaktInvoicePayload(order(), company, config));
+    expect(result.payload.services.every((service) => service.tax_symbol === "23")).toBe(true);
+  });
+
+  it("still records the normalized Polish NIP", () => {
+    const result = unwrap(buildInfaktInvoicePayload(order(), company, config));
+    expect(result.nip).toBe("5261040828");
+    expect(result.payload.client_tax_code).toBe("5261040828");
   });
 });

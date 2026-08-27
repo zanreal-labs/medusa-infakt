@@ -1,4 +1,5 @@
 import type { InvoiceBuyerInput, InvoiceOrderInput } from "./builder";
+import type { ClassifiableLine } from "./classification";
 import { bigNumberToMinorUnits, bigNumberToQuantity } from "./money";
 import type { NipExtractorOrder } from "./nip";
 
@@ -34,6 +35,15 @@ export interface MedusaLineItemLike {
   quantity: number;
   total?: unknown;
   unit_price?: unknown;
+  /**
+   * The three places a VAT classification marker can live, in the order the
+   * classifier checks them: the line, then its variant, then its product. A
+   * line-level marker wins so a one-off correction is possible without editing
+   * the catalogue.
+   */
+  metadata?: Record<string, unknown> | null;
+  variant?: { metadata?: Record<string, unknown> | null } | null;
+  product?: { metadata?: Record<string, unknown> | null } | null;
 }
 
 export interface MedusaShippingMethodLike {
@@ -59,6 +69,12 @@ export interface MedusaOrderLike extends NipExtractorOrder {
   display_id?: number | string | null;
   currency_code?: string | null;
   total?: unknown;
+  /**
+   * VAT the checkout collected. Only the OSS path reads it, and only to prove
+   * the buyer was charged the destination country's rate before an invoice
+   * claims they were. Requires `tax_total` in the worker's field list.
+   */
+  tax_total?: unknown;
   email?: string | null;
   created_at?: string | Date | null;
   canceled_at?: string | Date | null;
@@ -127,6 +143,7 @@ export function toInvoiceOrderInput(
       unitPrice: minorToMajor(bigNumberToMinorUnits(item.unit_price)),
     })),
     placedAt: order.created_at ?? null,
+    taxTotal: minorToMajor(bigNumberToMinorUnits(order.tax_total)),
     shipping: (order.shipping_methods ?? []).map((method) => ({
       grossTotal: minorToMajor(
         bigNumberToMinorUnits(method.total) ?? bigNumberToMinorUnits(method.amount),
@@ -135,6 +152,22 @@ export function toInvoiceOrderInput(
     })),
     total: minorToMajor(bigNumberToMinorUnits(order.total)),
   };
+}
+
+/**
+ * Reduce an order's lines to just what the VAT classifier needs.
+ *
+ * Kept beside the other mappers rather than inside `classification.ts` so the
+ * classifier stays free of Medusa DTO shapes and can be unit-tested on plain
+ * objects, the same way the builder is.
+ */
+export function toClassifiableLines(order: MedusaOrderLike): ClassifiableLine[] {
+  return (order.items ?? []).map((item) => ({
+    metadata: item.metadata ?? null,
+    name: lineItemName(item),
+    productMetadata: item.product?.metadata ?? null,
+    variantMetadata: item.variant?.metadata ?? null,
+  }));
 }
 
 /**

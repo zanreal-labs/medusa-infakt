@@ -8,9 +8,11 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
 import { INFAKT_MODULE } from "../../modules/infakt";
 import { runHealth } from "../../modules/infakt/claim-logic";
 import type InfaktModuleService from "../../modules/infakt/service";
-import { buildNeedsReviewNotification } from "./notify";
+import { buildNeedsReviewNotification, buildThresholdAlertNotification } from "./notify";
 import { processInvoiceRow } from "./pipeline";
 import type { InvoiceRow, PipelineDeps } from "./pipeline";
+import { warsawDate } from "./money";
+import { MossRateCache } from "./resolve-regime";
 import { classifyOutcome } from "./state-machine";
 
 /**
@@ -278,6 +280,14 @@ async function notifyNeedsReview(
   }
 }
 
+/** The columns the threshold reader selects off `infakt_invoice`. */
+interface EuB2cRow {
+  vat_base_minor: number | string | null;
+  vat_currency: string | null;
+  completed_at?: string | Date | null;
+  created_at?: string | Date | null;
+}
+
 async function buildDeps(
   container: MedusaContainer,
   infakt: InfaktModuleService,
@@ -295,8 +305,72 @@ async function buildDeps(
       const eventBus = container.resolve<IEventBusModuleService>(Modules.EVENT_BUS);
       await eventBus.emit({ data: payload, name: "infakt.invoice.issued" });
     },
+    /**
+     * Every number this plugin has already recorded, for the collision guard.
+     *
+     * Read fresh per row rather than cached for the run: the guard exists to
+     * catch a number two documents share, and a stale list is exactly the case
+     * where it would miss one issued moments earlier in the same batch.
+     */
+    async listIssuedNumbers() {
+      const rows = await infakt.listInfaktInvoices(
+        {},
+        { select: ["order_id", "invoice_number"], take: null },
+      );
+      return (rows as { order_id: string; invoice_number?: string | null }[]).map((entry) => ({
+        invoiceNumber: entry.invoice_number ?? null,
+        orderId: entry.order_id,
+      }));
+    },
+    /**
+     * The intra-EU B2C sales already on the books, for the OSS threshold.
+     *
+     * Derived from the invoices themselves rather than a separate counter: the
+     * rows this reads ARE the documents that were issued, so the figure cannot
+     * drift from reality, and an accountant can audit it by listing the same
+     * rows. Only `eu_b2c_domestic_rate` invoices count - reverse-charge B2B and
+     * non-EU sales are outside the threshold entirely.
+     */
+    async listEuB2cSales() {
+      const rows = await infakt.listInfaktInvoices(
+        { vat_regime: "eu_b2c_domestic_rate" },
+        { select: ["vat_base_minor", "vat_currency", "completed_at", "created_at"], take: null },
+      );
+      return (rows as EuB2cRow[])
+        .filter((entry) => entry.vat_base_minor !== null && entry.vat_currency)
+        .map((entry) => ({
+          baseMinor: Math.round(Number(entry.vat_base_minor)),
+          currency: String(entry.vat_currency),
+          date: warsawDate(entry.completed_at ?? entry.created_at ?? null),
+        }));
+    },
     logger,
+    // One cache for the whole run, so a batch of twenty orders to Germany asks
+    // inFakt for the rate once.
+    mossRates: new MossRateCache(client),
     options,
+    /**
+     * Early warning that the OSS threshold is approaching.
+     *
+     * Routed through the same admin feed a parked invoice uses, so it lands where
+     * an operator already looks rather than in a channel nobody watches.
+     */
+    async raiseAlert(message) {
+      try {
+        const notifications = container.resolve<INotificationModuleService>(Modules.NOTIFICATION);
+        await notifications.createNotifications(
+          buildThresholdAlertNotification({ day: warsawDate(), message }),
+        );
+      } catch (error) {
+        // Same policy as every other alert here: never fail a run over a missing
+        // notification provider. The warning still reaches the log.
+        logger.warn(
+          `[medusa-infakt] could not raise the OSS threshold alert: ${
+            error instanceof Error ? error.message : String(error)
+          } - ${message}`,
+        );
+      }
+    },
     async readOrder(orderId) {
       const query = container.resolve<{
         graph: (input: {
@@ -317,7 +391,14 @@ async function buildDeps(
           "created_at",
           "canceled_at",
           "metadata",
+          // Read so the OSS path can check the VAT actually charged against the
+          // destination country's rate. Unused on the domestic path.
+          "tax_total",
           "items.*",
+          // The VAT classification marker can live on any of the three, and
+          // `items.*` is a column wildcard that does not pull relations.
+          "items.variant.metadata",
+          "items.product.metadata",
           "shipping_methods.*",
           "billing_address.*",
           "shipping_address.*",

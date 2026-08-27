@@ -69,9 +69,22 @@ export function decideKsef(
     return { file: true, reason: 'ksef.mode is "all" - every invoice is filed' };
   }
 
-  return input.isCompany
-    ? { file: true, reason: "buyer has a NIP - B2B invoice, mandatory in KSeF" }
-    : { file: false, reason: "buyer has no NIP - consumer invoice, outside KSeF" };
+  if (!input.isCompany) {
+    return { file: false, reason: "buyer has no tax id - consumer invoice, outside KSeF" };
+  }
+
+  // A foreign business buyer is filed too. That is the owner's standing
+  // instruction - "everything with a tax id goes to KSeF, even abroad" - and the
+  // reason is spelled differently so the audit trail does not later claim a
+  // German VAT number was a NIP. Filing is not delivery: a foreign buyer cannot
+  // collect the invoice from KSeF, so the pipeline also emails it. See
+  // `deliverCrossBorderInvoice` in pipeline.ts.
+  return input.nip
+    ? { file: true, reason: "buyer has a Polish NIP - B2B invoice, mandatory in KSeF" }
+    : {
+        file: true,
+        reason: "buyer has a foreign tax id - filed to KSeF, and delivered to the buyer by email",
+      };
 }
 
 /**

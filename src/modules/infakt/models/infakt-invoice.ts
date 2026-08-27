@@ -87,6 +87,38 @@ const InfaktInvoice = model
     next_attempt_at: model.dateTime().nullable(),
     /** The Medusa order. Unique - one pipeline per order, ever. */
     order_id: model.text().unique(),
+    /**
+     * The VAT regime this invoice was issued under, frozen at build time for the
+     * same reason `ksef_required` is: a later config change - enabling OSS,
+     * flipping the VIES fallback - must not retroactively reinterpret a document
+     * that has already been issued.
+     *
+     * Null on every row that existed before cross-border support, which is read
+     * as "domestic". That is what makes this migration safe on a live store: no
+     * backfill, and every historical Polish invoice keeps its meaning.
+     *
+     * It is also what tells a resumed pipeline which inFakt document family it is
+     * polling - an OSS invoice is not created or read through the same endpoints.
+     */
+    vat_regime: model
+      .enum(["domestic", "reverse_charge", "eu_b2c_domestic_rate", "oss", "export_services"])
+      .nullable(),
+    /** Destination country for a cross-border invoice. Null domestically. */
+    vat_country: model.text().nullable(),
+    /** The destination rate an OSS invoice charged, e.g. "19". Audit only. */
+    vat_rate: model.text().nullable(),
+    /**
+     * Net taxable base, minor units, for an intra-EU B2C sale.
+     *
+     * Set only on the `eu_b2c_domestic_rate` regime, because that is the only
+     * one that counts toward the OSS threshold. Storing it here rather than in a
+     * separate ledger means the counter is derived from the invoices themselves:
+     * one source of truth, auditable by reading the same rows an accountant
+     * would, and incapable of drifting from what was actually issued.
+     */
+    vat_base_minor: model.bigNumber().nullable(),
+    /** Currency of `vat_base_minor`. The threshold is evaluated per currency. */
+    vat_currency: model.text().nullable(),
     /** Why this order was intentionally not invoiced (status `skipped`). */
     skip_reason: model.text().nullable(),
     status: model

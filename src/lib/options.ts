@@ -1,5 +1,8 @@
 import type { InfaktEnvironment } from "./infakt/types";
 import type { KsefDecider, KsefMode } from "./invoicing/ksef";
+import type { ViesFallback } from "./invoicing/regime";
+import { DEFAULT_ALERT_RATIO, DEFAULT_THRESHOLDS } from "./invoicing/threshold";
+import { DEFAULT_VIES_BASE_URL, DEFAULT_VIES_TIMEOUT_MS } from "./invoicing/vies";
 import { ksefPossible, resolveRequireActive } from "./invoicing/ksef";
 import { isCalendarDate } from "./invoicing/money";
 import { defaultNipExtractor } from "./invoicing/nip";
@@ -109,6 +112,71 @@ export interface InfaktPluginOptions {
   /** Per-request timeout for inFakt calls, in ms. Defaults to 60_000. */
   timeoutMs?: number;
   /**
+   * Cross-border VAT. Off by default, and that default is load-bearing.
+   *
+   * With this absent the plugin behaves exactly as it did before cross-border
+   * support existed: `currency` is the only currency invoiced, everything else
+   * is skipped, and every line carries `taxSymbol`. Turning it on is a decision
+   * with tax consequences, so it is never inherited from an upgrade.
+   *
+   * NOTE: enabling a currency here also arms downstream license-key delivery for
+   * orders in that currency, because key purchase is triggered by
+   * `infakt.invoice.issued`, and orders skipped for currency never reach it.
+   */
+  crossBorder?: {
+    /** Master switch. False (the default) keeps every foreign order skipped. */
+    enabled?: boolean;
+    /**
+     * Currencies invoiced in addition to `currency`, e.g. `["EUR", "USD"]`.
+     * Empty means cross-border orders must still be in the domestic currency.
+     */
+    currencies?: string[];
+    /**
+     * What an unavailable VIES check means for an EU business buyer.
+     * `review` (default) parks the order; `consumer` charges destination VAT.
+     */
+    viesFallback?: ViesFallback;
+    /** Override the VIES endpoint. Only for testing or an EU URL change. */
+    viesBaseUrl?: string;
+    /** VIES request timeout, ms. Defaults to 8000. */
+    viesTimeoutMs?: number;
+    /** Email cross-border invoices to the buyer. Defaults to true. */
+    emailInvoice?: boolean;
+  };
+  /**
+   * The OSS procedure, for consumers in other member states.
+   *
+   * Separately gated from `crossBorder` and also off by default, because OSS
+   * carries a risk the other branches do not: OSS invoices are a separate inFakt
+   * document family with their own numbering series, and the invoice number is
+   * what downstream license fulfilment keys on. See `invoice-number.ts`.
+   */
+  oss?: {
+    enabled?: boolean;
+    /**
+     * Whether the company actually HOLDS a union OSS registration (VIU-R).
+     *
+     * Separate from `enabled`, and false by default, because the two answer
+     * different questions: `enabled` is "is this code path switched on", and this
+     * is "is destination-rate invoicing lawful for us". Without registration an
+     * EU consumer sale is taxed at the domestic rate while the intra-EU B2C
+     * threshold allows it, and has no correct treatment at all once it does not.
+     */
+    registered?: boolean;
+    /**
+     * Per-currency intra-EU B2C thresholds, in minor units.
+     *
+     * Defaults to EUR 10 000 and its statutory PLN equivalent of 42 000 PLN. A
+     * currency with no entry cannot be evaluated and parks the order rather than
+     * being silently excluded from the count.
+     */
+    thresholds?: Record<string, number>;
+    /** Warn at this fraction of the threshold. Defaults to 0.8. */
+    alertRatio?: number;
+    /** inFakt's service taxonomy. License keys and software are `electronic`. */
+    serviceType?: "electronic" | "broadcasting" | "telecommunications";
+  };
+  /**
    * Key material for encrypting an admin-set `apiKey` override at rest.
    *
    * `currency`, `ksef.mode`, `triggerEvent`, `environment` and `apiKey` can all be
@@ -148,6 +216,19 @@ export interface ResolvedInfaktOptions {
   timeoutMs: number;
   /** null when unset: no admin-set `apiKey` override can be persisted. */
   settingsEncryptionKey: string | null;
+  /** False keeps every foreign order skipped, exactly as before this feature. */
+  crossBorderEnabled: boolean;
+  /** Extra currencies invoiced when `crossBorderEnabled`. Never includes `currency`. */
+  crossBorderCurrencies: readonly string[];
+  viesFallback: ViesFallback;
+  viesBaseUrl: string;
+  viesTimeoutMs: number;
+  emailCrossBorderInvoice: boolean;
+  ossEnabled: boolean;
+  ossRegistered: boolean;
+  ossThresholds: Readonly<Record<string, number>>;
+  ossAlertRatio: number;
+  ossServiceType: "electronic" | "broadcasting" | "telecommunications";
 }
 
 /**
@@ -169,6 +250,11 @@ export interface InfaktPublicOptions {
   emitIssuedEvent: boolean;
   /** True when the plugin is inert because no `apiKey` is configured. */
   disabled: boolean;
+  crossBorderEnabled: boolean;
+  crossBorderCurrencies: readonly string[];
+  ossEnabled: boolean;
+  ossRegistered: boolean;
+  viesFallback: ViesFallback;
 }
 
 /**
@@ -207,6 +293,70 @@ export const DEFAULT_TIMEOUT_MS = 60_000;
 export const VALID_KSEF_MODES: readonly KsefMode[] = ["nip-only", "all", "never"];
 /** See the note on `VALID_KSEF_MODES` - shared with the admin-editable override. */
 export const VALID_TRIGGERS = ["payment.captured", "order.placed"] as const;
+export const VALID_VIES_FALLBACKS: readonly ViesFallback[] = ["review", "consumer"];
+export const VALID_OSS_SERVICE_TYPES = [
+  "electronic",
+  "broadcasting",
+  "telecommunications",
+] as const;
+
+/** Uppercase the currency keys of a threshold map and reject unusable limits. */
+function normalizeThresholdMap(
+  thresholds: Record<string, number> | undefined,
+): Record<string, number> {
+  if (thresholds === undefined) {
+    return {};
+  }
+  const normalized: Record<string, number> = {};
+  for (const [currency, limit] of Object.entries(thresholds)) {
+    const code = currency.trim().toUpperCase();
+    if (!/^[A-Z]{3}$/u.test(code)) {
+      throw optionError(
+        `plugin option \`oss.thresholds\` must be keyed by 3-letter ISO codes (got "${currency}").`,
+      );
+    }
+    if (!Number.isFinite(limit) || limit <= 0) {
+      throw optionError(`plugin option \`oss.thresholds.${code}\` must be a positive number.`);
+    }
+    normalized[code] = limit;
+  }
+  return normalized;
+}
+
+/**
+ * Normalize the extra cross-border currencies.
+ *
+ * The domestic currency is filtered out rather than rejected: listing it is a
+ * harmless redundancy, and failing the boot over it would be a poor trade. Each
+ * entry must be a real 3-letter code, because a typo here silently means "this
+ * currency is not invoiced" - a skipped order rather than an error.
+ */
+function normalizeCurrencyList(
+  values: string[] | undefined,
+  domestic: string,
+): readonly string[] {
+  if (values === undefined) {
+    return [];
+  }
+  if (!Array.isArray(values)) {
+    throw optionError("plugin option `crossBorder.currencies` must be an array of currency codes.");
+  }
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const normalized = String(raw ?? "")
+      .trim()
+      .toUpperCase();
+    if (!/^[A-Z]{3}$/u.test(normalized)) {
+      throw optionError(
+        `plugin option \`crossBorder.currencies\` must contain 3-letter ISO codes (got "${String(raw)}").`,
+      );
+    }
+    if (normalized !== domestic.toUpperCase()) {
+      seen.add(normalized);
+    }
+  }
+  return [...seen];
+}
 
 export const toPublicInfaktOptions = (options: ResolvedInfaktOptions): InfaktPublicOptions => ({
   currency: options.currency,
@@ -217,8 +367,13 @@ export const toPublicInfaktOptions = (options: ResolvedInfaktOptions): InfaktPub
   ksefMode: options.ksefMode,
   ksefRequireActive: options.ksefRequireActive,
   startDate: options.startDate,
+  crossBorderCurrencies: options.crossBorderCurrencies,
+  crossBorderEnabled: options.crossBorderEnabled,
+  ossEnabled: options.ossEnabled,
+  ossRegistered: options.ossRegistered,
   taxSymbol: options.taxSymbol,
   triggerEvent: options.triggerEvent,
+  viesFallback: options.viesFallback,
 });
 
 const optionError = (message: string): Error =>
@@ -326,6 +481,45 @@ export const resolveInfaktOptions = (
   }
   const settingsEncryptionKey = settingsEncryptionKeyRaw ? settingsEncryptionKeyRaw : null;
 
+  const crossBorderEnabled = options.crossBorder?.enabled === true;
+  const crossBorderCurrencies = normalizeCurrencyList(options.crossBorder?.currencies, currency);
+
+  const viesFallback = options.crossBorder?.viesFallback ?? "review";
+  if (!VALID_VIES_FALLBACKS.includes(viesFallback)) {
+    throw optionError(
+      `plugin option \`crossBorder.viesFallback\` must be one of ${VALID_VIES_FALLBACKS.join(", ")} (got "${String(viesFallback)}").`,
+    );
+  }
+
+  const ossEnabled = options.oss?.enabled === true;
+  if (ossEnabled && !crossBorderEnabled) {
+    // OSS without cross-border is a configuration that cannot do anything: the
+    // currency gate would skip the orders before the regime is ever consulted.
+    // Failing at boot beats an operator concluding OSS is broken.
+    throw optionError(
+      "plugin option `oss.enabled` requires `crossBorder.enabled` - an OSS sale is a cross-border sale.",
+    );
+  }
+
+  const ossRegistered = options.oss?.registered === true;
+  const ossAlertRatio = options.oss?.alertRatio ?? DEFAULT_ALERT_RATIO;
+  if (!Number.isFinite(ossAlertRatio) || ossAlertRatio <= 0 || ossAlertRatio > 1) {
+    throw optionError("plugin option `oss.alertRatio` must be a number greater than 0 and at most 1.");
+  }
+  const ossThresholds = { ...DEFAULT_THRESHOLDS, ...normalizeThresholdMap(options.oss?.thresholds) };
+
+  const ossServiceType = options.oss?.serviceType ?? "electronic";
+  if (!VALID_OSS_SERVICE_TYPES.includes(ossServiceType)) {
+    throw optionError(
+      `plugin option \`oss.serviceType\` must be one of ${VALID_OSS_SERVICE_TYPES.join(", ")} (got "${String(ossServiceType)}").`,
+    );
+  }
+
+  const viesTimeoutMs = options.crossBorder?.viesTimeoutMs ?? DEFAULT_VIES_TIMEOUT_MS;
+  if (!Number.isFinite(viesTimeoutMs) || viesTimeoutMs <= 0) {
+    throw optionError("plugin option `crossBorder.viesTimeoutMs` must be a positive number.");
+  }
+
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw optionError(
@@ -357,11 +551,22 @@ export const resolveInfaktOptions = (
     ksefMode,
     ksefPossible: ksefPossible(ksefMode, ksefDecide),
     ksefRequireActive: resolveRequireActive(options.ksef?.requireActive, environment),
+    crossBorderCurrencies,
+    crossBorderEnabled,
+    emailCrossBorderInvoice: options.crossBorder?.emailInvoice ?? true,
     nipExtractor: nipExtractor ?? defaultNipExtractor,
+    ossAlertRatio,
+    ossEnabled,
+    ossRegistered,
+    ossServiceType,
+    ossThresholds,
     settingsEncryptionKey,
     startDate,
     taxSymbol,
     timeoutMs,
     triggerEvent,
+    viesBaseUrl: options.crossBorder?.viesBaseUrl?.trim() || DEFAULT_VIES_BASE_URL,
+    viesFallback,
+    viesTimeoutMs,
   };
 };

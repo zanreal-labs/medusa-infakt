@@ -1,6 +1,7 @@
 import type { InfaktInvoicePayload, InfaktServicePayload } from "../infakt/types";
 import { toMinorUnits, warsawDate } from "./money";
 import { normalizeNip } from "./nip";
+import type { VatRegime } from "./regime";
 
 /**
  * inFakt invoice payload builder.
@@ -34,9 +35,9 @@ import { normalizeNip } from "./nip";
  */
 
 /** inFakt rejects overly long service names; marketplace titles can be long. */
-const MAX_SERVICE_NAME = 255;
+export const MAX_SERVICE_NAME = 255;
 /** Polish "pcs.", the unit for a countable line. */
-const UNIT_PIECES = "szt.";
+export const UNIT_PIECES = "szt.";
 /** inFakt's own label for a bank transfer. */
 const PAYMENT_METHOD_TRANSFER = "transfer";
 
@@ -45,6 +46,19 @@ export interface InvoiceBuilderConfig {
   currency: string;
   /** inFakt VAT rate symbol applied to every line (e.g. "23"). */
   taxSymbol: string;
+  /**
+   * The VAT regime this sale falls under.
+   *
+   * Optional, and its absence means "domestic" - which is what every existing
+   * caller and every existing test gets. That is deliberate: the Polish path is
+   * live, and the safest shape for this change is one where not passing the new
+   * argument reproduces the old behaviour exactly rather than merely closely.
+   *
+   * An `oss` regime must never arrive here; OSS is a different document family
+   * built by `oss-builder.ts`. Passing one is a programming error and is
+   * refused rather than approximated.
+   */
+  regime?: VatRegime;
 }
 
 export interface InvoiceItemInput {
@@ -78,6 +92,15 @@ export interface InvoiceOrderInput {
   total: number | string | null;
   /** When the order was placed (ISO timestamp). Becomes the sale date. */
   placedAt?: string | Date | null;
+  /**
+   * VAT the checkout actually collected, in major units.
+   *
+   * Unused on the domestic path, where the rate is a store constant and the
+   * gross is authoritative. It exists for the OSS path, which has to prove that
+   * the tax the buyer paid matches the destination country's rate before it can
+   * issue a document claiming as much. See `oss-builder.ts`.
+   */
+  taxTotal?: number | string | null;
   items: InvoiceItemInput[];
   shipping?: InvoiceShippingInput[];
 }
@@ -121,9 +144,32 @@ export function buildInfaktInvoicePayload(
     return { ok: false, reason: "order has no items" };
   }
 
+  const regime: VatRegime = config.regime ?? { kind: "domestic", taxSymbol: config.taxSymbol };
+  if (regime.kind === "oss") {
+    return { ok: false, reason: "an OSS sale is a different document family and cannot be built here" };
+  }
+  if (regime.kind === "blocked") {
+    return { ok: false, reason: regime.reason };
+  }
+
+  // "np" - nie podlega - is the symbol for a supply outside the scope of Polish
+  // VAT, and it is what the two out-of-scope branches use. Note that it is NOT
+  // the "0" rate: 0% is a Polish rate that Polish VAT applies to, whereas these
+  // supplies are not taxed in Poland at all. inFakt's own documentation example
+  // for a foreign invoice uses "0"; the owner confirmed "np", and the one such
+  // invoice this account has ever issued uses "np" too.
+  //
+  // An EU consumer below the threshold is the exception that proves the rule:
+  // the sale is foreign but the place of supply is still Poland, so it carries
+  // the ordinary Polish rate rather than `np`.
+  const taxSymbol =
+    regime.kind === "domestic" || regime.kind === "eu_b2c_domestic_rate"
+      ? regime.taxSymbol
+      : "np";
+
   const services: InfaktServicePayload[] = [];
   for (const item of order.items) {
-    const line = lineTotalMinor(item);
+    const line = lineGrossMinor(item);
     if (line === null) {
       return { ok: false, reason: "order item has an invalid price or quantity" };
     }
@@ -131,7 +177,7 @@ export function buildInfaktInvoicePayload(
       gross_price: line,
       name: item.name.slice(0, MAX_SERVICE_NAME),
       quantity: item.quantity,
-      tax_symbol: config.taxSymbol,
+      tax_symbol: taxSymbol,
       unit: UNIT_PIECES,
     });
   }
@@ -149,9 +195,9 @@ export function buildInfaktInvoicePayload(
     }
     services.push({
       gross_price: shippingMinor,
-      name: shipping.name ? `Dostawa - ${shipping.name}`.slice(0, MAX_SERVICE_NAME) : "Dostawa",
+      name: shippingLineName(shipping.name),
       quantity: 1,
-      tax_symbol: config.taxSymbol,
+      tax_symbol: taxSymbol,
       unit: UNIT_PIECES,
     });
   }
@@ -173,7 +219,7 @@ export function buildInfaktInvoicePayload(
     };
   }
 
-  const client = buildClientFields(buyer);
+  const client = buildClientFields(buyer, regime);
   if ("reason" in client) {
     return { ok: false, reason: client.reason };
   }
@@ -190,10 +236,25 @@ export function buildInfaktInvoicePayload(
       payment_method: PAYMENT_METHOD_TRANSFER,
       sale_date: saleDate,
       services,
+      // A domestic invoice must come out byte-identical to the one this plugin
+      // issues today, so nothing is added to it. A foreign invoice always gets
+      // `sale_type` (inFakt documents it as applying to foreign documents), but
+      // only the two out-of-scope regimes carry a legal annotation - an EU
+      // consumer below the threshold is an ordinary Polish VAT invoice that
+      // happens to be addressed abroad, and annotating it would misstate it.
+      ...(regime.kind === "domestic" ? {} : { sale_type: "service" as const }),
+      ...(regime.kind === "reverse_charge" || regime.kind === "export_services"
+        ? { notes: regime.note }
+        : {}),
       ...client.fields,
     },
     totalMinor: orderTotal,
   };
+}
+
+/** The "Dostawa" label for a shipping line. Shared with the OSS builder. */
+export function shippingLineName(name: string | null | undefined): string {
+  return name ? `Dostawa - ${name}`.slice(0, MAX_SERVICE_NAME) : "Dostawa";
 }
 
 /**
@@ -203,7 +264,7 @@ export function buildInfaktInvoicePayload(
  * "szt." unit, and a fractional one would make the per-unit price it derives
  * meaningless.
  */
-function lineTotalMinor(item: InvoiceItemInput): number | null {
+export function lineGrossMinor(item: InvoiceItemInput): number | null {
   if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
     return null;
   }
@@ -222,7 +283,10 @@ type ClientFieldsResult =
   | { fields: Partial<InfaktInvoicePayload>; isCompany: boolean; nip?: string }
   | { reason: string };
 
-function buildClientFields(buyer: InvoiceBuyerInput | undefined): ClientFieldsResult {
+function buildClientFields(
+  buyer: InvoiceBuyerInput | undefined,
+  regime: VatRegime,
+): ClientFieldsResult {
   if (!buyer) {
     return { reason: "order has no billing details" };
   }
@@ -247,6 +311,36 @@ function buildClientFields(buyer: InvoiceBuyerInput | undefined): ClientFieldsRe
     client_street: street,
     ...(buyer.email ? { client_email: buyer.email } : {}),
   } satisfies Partial<InfaktInvoicePayload>;
+
+  // A cross-border business buyer's tax code is decided by the regime, not by
+  // the Polish NIP parser. `regime.vatId` is already normalized and, for a
+  // reverse charge, already VIES-confirmed - re-deriving it from the raw field
+  // here would risk the document disagreeing with the decision that justified
+  // its rate.
+  if (regime.kind === "reverse_charge" || regime.kind === "export_services") {
+    const companyName = buyer.companyName?.trim();
+    if (!companyName) {
+      return { reason: "a cross-border business invoice needs the buyer's company name" };
+    }
+    const taxCode =
+      regime.kind === "reverse_charge" ? regime.vatId : buyer.taxId?.trim().toUpperCase();
+    // An export of services may legitimately have no tax code at all - the one
+    // such invoice on this account does not - so it is omitted rather than
+    // demanded. A reverse charge always has one, guaranteed by the regime.
+    return {
+      fields: {
+        ...common,
+        client_business_activity_kind: "other_business",
+        client_company_name: companyName,
+        ...(taxCode ? { client_tax_code: taxCode } : {}),
+      },
+      isCompany: true,
+      // `nip` stays undefined: it names a Polish NIP specifically, and the KSeF
+      // audit trail reads it. A foreign VAT id is not one, and putting it here
+      // would make `is_company` and `nip` disagree about what kind of identifier
+      // the row is carrying.
+    };
+  }
 
   const taxId = buyer.taxId?.trim();
   if (taxId) {

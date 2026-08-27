@@ -9,6 +9,8 @@ import type {
   InfaktInvoicePayload,
   InfaktKsefIntegration,
   InfaktKsefStatus,
+  InfaktMossRate,
+  InfaktOssInvoicePayload,
 } from "./types";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -24,6 +26,13 @@ interface AsyncTaskResponse {
   invoice_task_reference_number: string;
   processing_code?: number;
   processing_description?: string;
+}
+
+interface MossRateResponse {
+  id: number;
+  country: string;
+  value: number | string;
+  reduced?: boolean;
 }
 
 interface AsyncTaskStatusResponse {
@@ -236,6 +245,69 @@ export class InfaktClient {
       processingCode: raw.processing_code,
       processingDescription: raw.processing_description,
     };
+  }
+
+  /**
+   * POST /async/oss_invoices.json - issue an OSS invoice.
+   *
+   * The second destructive call in the plugin, and the more dangerous of the
+   * two, for a reason that has nothing to do with VAT: OSS invoices are a
+   * separate document family at inFakt and therefore carry their own numbering
+   * series. The invoice number is the reference the Marken plugin buys license
+   * keys under, and it has no uniqueness constraint on our side, so a series
+   * that restarts at 1 can collide with an existing VAT invoice number and cause
+   * one order's license keys to be delivered against another's.
+   *
+   * That is why every caller must go through the collision guard in
+   * `invoice-number.ts` before emitting `infakt.invoice.issued`, and why OSS is
+   * off by default. The numbering inFakt actually assigns could not be
+   * established without issuing a real OSS invoice, which this task was not
+   * authorized to do.
+   */
+  async createOssInvoiceAsync(invoice: InfaktOssInvoicePayload): Promise<InfaktAsyncTask> {
+    const raw = await this.request<AsyncTaskResponse>("POST", "/async/oss_invoices.json", {
+      body: { oss_invoice: invoice },
+    });
+    return {
+      invoiceTaskReferenceNumber: raw.invoice_task_reference_number,
+      processingCode: raw.processing_code,
+      processingDescription: raw.processing_description,
+    };
+  }
+
+  /**
+   * GET /moss_vat_rates.json - the destination VAT rates OSS invoices use.
+   *
+   * Read from inFakt rather than kept in this repo on purpose. These rates
+   * change by national legislation, and a table hardcoded in a plugin is a table
+   * that is wrong the first time a member state moves its standard rate. inFakt
+   * maintains it and is also the system that will accept or reject the invoice,
+   * so it is the only source that cannot disagree with itself.
+   */
+  async listMossRates(country?: string): Promise<InfaktMossRate[]> {
+    const raw = await this.request<MossRateResponse[]>("GET", "/moss_vat_rates.json", {
+      query: country ? { country } : undefined,
+    });
+    return (raw ?? []).map((rate) => ({
+      country: rate.country,
+      id: rate.id,
+      reduced: rate.reduced === true,
+      value: Number(rate.value),
+    }));
+  }
+
+  /**
+   * POST /invoices/{uuid}/deliver.json - email the invoice to the buyer.
+   *
+   * Needed specifically for cross-border invoices. A Polish B2B buyer collects
+   * their invoice from KSeF, but a foreign buyer has no access to it, so filing
+   * the document is not the same as delivering it. Best-effort by design: a
+   * failed email must not undo an invoice that has already been issued.
+   */
+  async sendInvoiceEmail(uuid: string, email?: string): Promise<void> {
+    await this.request("POST", `/invoices/${encodeURIComponent(uuid)}/deliver.json`, {
+      body: email ? { print_type: "original", recipient: email } : { print_type: "original" },
+    });
   }
 
   /** GET /async/invoices/status/{reference}.json - poll an async invoice task. */
