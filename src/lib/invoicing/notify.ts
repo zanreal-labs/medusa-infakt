@@ -43,6 +43,32 @@ export interface AdminFeedNotification {
 /** Trigger identifier stamped on the notification, for anyone filtering the feed. */
 export const NEEDS_REVIEW_TRIGGER = "infakt.invoice.needs_review";
 
+/** Trigger identifier for the intra-EU B2C threshold warning. */
+export const OSS_THRESHOLD_TRIGGER = "infakt.oss.threshold_approaching";
+
+/**
+ * The early warning that the intra-EU B2C threshold is close.
+ *
+ * Deduplicated per Warsaw day rather than per order: crossing 80% is a fact about
+ * the business, not about one sale, and firing it on every subsequent order would
+ * train the operator to ignore the one alert that must not be ignored.
+ */
+export function buildThresholdAlertNotification(input: {
+  message: string;
+  day: string;
+}): AdminFeedNotification {
+  return {
+    channel: ADMIN_FEED_CHANNEL,
+    data: { description: input.message, title: "OSS threshold approaching" },
+    idempotency_key: `infakt-oss-threshold-${input.day}`,
+    resource_id: "infakt-oss-threshold",
+    resource_type: "infakt",
+    template: ADMIN_FEED_TEMPLATE,
+    to: "",
+    trigger_type: OSS_THRESHOLD_TRIGGER,
+  };
+}
+
 /**
  * Build the admin-feed notification for an order the pipeline could not invoice
  * automatically.

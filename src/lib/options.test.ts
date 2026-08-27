@@ -242,3 +242,66 @@ describe("toPublicInfaktOptions", () => {
     ).toBe(false);
   });
 });
+
+describe("cross-border options", () => {
+  const resolve = (overrides: Partial<InfaktPluginOptions> = {}) =>
+    resolveInfaktOptions(valid(overrides));
+  const expectError = (overrides: Partial<InfaktPluginOptions>, match: RegExp) => {
+    expect(() => resolveInfaktOptions(valid(overrides))).toThrow(match);
+  };
+
+  it("keeps cross-border off unless it is explicitly enabled", () => {
+    const resolved = resolve();
+    expect(resolved.crossBorderEnabled).toBe(false);
+    expect(resolved.crossBorderCurrencies).toEqual([]);
+    expect(resolved.ossEnabled).toBe(false);
+  });
+
+  it("normalizes and de-duplicates the extra currencies", () => {
+    expect(
+      resolve({ crossBorder: { currencies: ["eur", "EUR", "usd"], enabled: true } })
+        .crossBorderCurrencies,
+    ).toEqual(["EUR", "USD"]);
+  });
+
+  it("drops the domestic currency from the extra list rather than failing", () => {
+    expect(
+      resolve({ crossBorder: { currencies: ["PLN", "EUR"], enabled: true } }).crossBorderCurrencies,
+    ).toEqual(["EUR"]);
+  });
+
+  it("rejects a currency code that is not three letters", () => {
+    expectError({ crossBorder: { currencies: ["EURO"], enabled: true } }, /3-letter ISO codes/u);
+  });
+
+  it("rejects OSS without cross-border, which could never do anything", () => {
+    expectError({ oss: { enabled: true } }, /requires/u);
+  });
+
+  it("defaults the VIES fallback to parking the order", () => {
+    expect(resolve().viesFallback).toBe("review");
+  });
+
+  it("accepts the consumer fallback", () => {
+    expect(resolve({ crossBorder: { enabled: true, viesFallback: "consumer" } }).viesFallback).toBe(
+      "consumer",
+    );
+  });
+
+  it("rejects an unknown VIES fallback", () => {
+    expectError(
+      { crossBorder: { enabled: true, viesFallback: "zero-rate" as never } },
+      /viesFallback/u,
+    );
+  });
+
+  it("defaults the OSS service type to electronic, which is what software is", () => {
+    expect(
+      resolve({ crossBorder: { enabled: true }, oss: { enabled: true } }).ossServiceType,
+    ).toBe("electronic");
+  });
+
+  it("emails cross-border invoices by default, since KSeF cannot deliver them", () => {
+    expect(resolve().emailCrossBorderInvoice).toBe(true);
+  });
+});

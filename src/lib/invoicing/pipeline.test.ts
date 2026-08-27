@@ -52,6 +52,9 @@ const harness = (config?: {
   options?: Partial<InfaktPluginOptions>;
   client?: Record<string, unknown>;
   emitIssued?: () => Promise<void>;
+  listIssuedNumbers?: () => Promise<{ orderId: string; invoiceNumber: string | null }[]>;
+  listEuB2cSales?: () => Promise<{ baseMinor: number; currency: string; date: string }[]>;
+  raiseAlert?: (message: string) => Promise<void>;
 }): Harness => {
   const updates: Record<string, unknown>[] = [];
   const emitted: unknown[] = [];
@@ -64,7 +67,12 @@ const harness = (config?: {
       .fn()
       .mockResolvedValue({ done: true, failed: false, invoiceUuid: "u-1", processingCode: 201 }),
     getKsefStatus: vi.fn().mockResolvedValue({ ksefNumber: "K-1", status: "success" }),
+    createOssInvoiceAsync: vi
+      .fn()
+      .mockResolvedValue({ invoiceTaskReferenceNumber: "ref-oss", processingCode: 100 }),
+    listMossRates: vi.fn().mockResolvedValue([{ country: "DE", id: 9, reduced: false, value: 19 }]),
     markPaid: vi.fn().mockResolvedValue(null),
+    sendInvoiceEmail: vi.fn().mockResolvedValue(null),
     sendToKsef: vi.fn().mockResolvedValue(null),
     ...config?.client,
   } as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -81,8 +89,11 @@ const harness = (config?: {
           emitted.push(payload);
           return Promise.resolve();
         }),
+      listEuB2cSales: config?.listEuB2cSales ?? (() => Promise.resolve([])),
+      listIssuedNumbers: config?.listIssuedNumbers ?? (() => Promise.resolve([])),
       logger: { warn: vi.fn() },
       options: options(config?.options),
+      raiseAlert: config?.raiseAlert,
       readOrder: () => Promise.resolve(orderData),
       sleep: () => Promise.resolve(),
       update: (id, patch) => {
@@ -151,7 +162,9 @@ describe("processInvoiceRow: the happy path", () => {
     const { deps } = harness();
     const target = row();
     await processInvoiceRow(target, deps);
-    expect(target.ksef_decision_reason).toContain("no NIP");
+    // "tax id" rather than "NIP": the same branch now also covers foreign buyers,
+    // and a German VAT number must not be described in the audit trail as a NIP.
+    expect(target.ksef_decision_reason).toContain("no tax id");
   });
 
   it("emits infakt.invoice.issued exactly once, with the PDF marker", async () => {
@@ -704,5 +717,293 @@ describe("processInvoiceRow: the NIP extractor option", () => {
     const thrown = await signal(processInvoiceRow(row(), deps));
     expect(thrown.kind).toBe("review");
     expect(thrown.message).toBe("buyer has a NIP but no company name");
+  });
+});
+
+describe("the currency gate", () => {
+  it("skips a foreign currency when cross-border is off", async () => {
+    const { deps } = harness({ order: medusaOrder({ currency_code: "EUR" }) });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("skipped");
+    expect(outcome.message).toContain("PLN only");
+  });
+
+  it("still skips a currency that was not opted in", async () => {
+    const { deps } = harness({
+      options: { crossBorder: { currencies: ["EUR"], enabled: true } },
+      order: medusaOrder({ currency_code: "USD" }),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("skipped");
+    expect(outcome.message).toContain("PLN, EUR");
+  });
+
+  it("lets an opted-in currency through the gate", async () => {
+    const { deps } = harness({
+      options: { crossBorder: { currencies: ["EUR"], enabled: true } },
+      order: medusaOrder({
+        billing_address: {
+          address_1: "Hauptstrasse 1",
+          city: "Berlin",
+          company: "ACME GmbH",
+          country_code: "DE",
+          first_name: "Anna",
+          last_name: "Schmidt",
+          postal_code: "10115",
+        },
+        currency_code: "EUR",
+        items: [
+          {
+            metadata: { tax_supply: "service" },
+            product_title: "Antywirus",
+            quantity: 1,
+            total: 123.45,
+          },
+        ],
+        metadata: { nip: "DE123456789", vies: "valid" },
+      }),
+    });
+    const target = row();
+    await processInvoiceRow(target, deps);
+    expect(target.status).toBe("done");
+  });
+});
+
+describe("the cross-border path", () => {
+  const deOrder = (overrides: Record<string, unknown> = {}) =>
+    medusaOrder({
+      billing_address: {
+        address_1: "Hauptstrasse 1",
+        city: "Berlin",
+        company: "ACME GmbH",
+        country_code: "DE",
+        first_name: "Anna",
+        last_name: "Schmidt",
+        postal_code: "10115",
+      },
+      currency_code: "EUR",
+      items: [
+        {
+          metadata: { tax_supply: "service" },
+          product_title: "Antywirus",
+          quantity: 1,
+          total: 123.45,
+        },
+      ],
+      metadata: { nip: "DE123456789", vies: "valid" },
+      ...overrides,
+    });
+
+  const crossBorder = { crossBorder: { currencies: ["EUR"], enabled: true } };
+
+  it("records the regime on the row so a resume cannot reinterpret it", async () => {
+    const { deps, updates } = harness({ options: crossBorder, order: deOrder() });
+    await processInvoiceRow(row(), deps);
+    const submit = updates.find((update) => update.vat_regime !== undefined);
+    expect(submit).toMatchObject({ vat_country: "DE", vat_regime: "reverse_charge" });
+  });
+
+  it("sends np lines and the reverse-charge annotation to inFakt", async () => {
+    const { client, deps } = harness({ options: crossBorder, order: deOrder() });
+    await processInvoiceRow(row(), deps);
+    const payload = client.createInvoiceAsync.mock.calls[0]?.[0];
+    expect(payload.services.every((s: { tax_symbol: string }) => s.tax_symbol === "np")).toBe(true);
+    expect(payload.notes).toContain("Reverse charge");
+    expect(payload.client_tax_code).toBe("DE123456789");
+  });
+
+  it("files a foreign business invoice to KSeF and also emails it", async () => {
+    const { client, deps, updates } = harness({ options: crossBorder, order: deOrder() });
+    await processInvoiceRow(row(), deps);
+    expect(client.sendToKsef).toHaveBeenCalled();
+    expect(client.sendInvoiceEmail).toHaveBeenCalledWith("u-1");
+    expect(updates.some((u) => String(u.ksef_decision_reason ?? "").includes("foreign"))).toBe(true);
+  });
+
+  it("does not email a domestic invoice", async () => {
+    const { client, deps } = harness();
+    await processInvoiceRow(row(), deps);
+    expect(client.sendInvoiceEmail).not.toHaveBeenCalled();
+  });
+
+  it("parks when VIES never confirmed the buyer", async () => {
+    const { deps } = harness({
+      options: crossBorder,
+      order: deOrder({ metadata: { nip: "DE123456789" } }),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("review");
+    expect(outcome.message).toContain("VIES");
+  });
+
+  it("parks an unclassified product rather than assuming it is a service", async () => {
+    const { deps } = harness({
+      options: crossBorder,
+      order: deOrder({
+        items: [{ product_title: "DJI Mini 5 Pro", quantity: 1, total: 123.45 }],
+      }),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("review");
+    expect(outcome.message).toContain("DJI Mini 5 Pro");
+  });
+
+  it("charges an EU consumer the Polish rate while below the threshold", async () => {
+    // Not registered for OSS and well under the limit: the place of supply stays
+    // in Poland under art. 28k ust. 2, so 23% is correct BECAUSE of the threshold.
+    const { client, deps, updates } = harness({
+      options: crossBorder,
+      order: deOrder({ metadata: {} }),
+    });
+    const target = row();
+    await processInvoiceRow(target, deps);
+
+    expect(target.status).toBe("done");
+    const payload = client.createInvoiceAsync.mock.calls[0]?.[0];
+    expect(payload.services.every((s: { tax_symbol: string }) => s.tax_symbol === "23")).toBe(true);
+    expect(payload.notes).toBeUndefined();
+    expect(client.createOssInvoiceAsync).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.vat_regime !== undefined)).toMatchObject({
+      vat_country: "DE",
+      vat_currency: "EUR",
+      vat_regime: "eu_b2c_domestic_rate",
+    });
+  });
+
+  it("records the taxable base so the threshold counter can be audited", async () => {
+    const { deps, updates } = harness({
+      options: crossBorder,
+      order: deOrder({ metadata: {} }),
+    });
+    await processInvoiceRow(row(), deps);
+    expect(updates.find((u) => u.vat_regime !== undefined)?.vat_base_minor).toBe(12_345);
+  });
+
+  it("parks an EU consumer once the threshold is crossed and OSS is not registered", async () => {
+    const { deps } = harness({
+      listEuB2cSales: () =>
+        Promise.resolve([{ baseMinor: 999_000, currency: "EUR", date: "2026-07-01" }]),
+      options: crossBorder,
+      order: deOrder({ metadata: {} }),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("review");
+    expect(outcome.message).toContain("threshold");
+    expect(outcome.message).toContain("not registered for OSS");
+  });
+
+  it("raises an early alert before the threshold is reached", async () => {
+    const alerts: string[] = [];
+    const { deps } = harness({
+      listEuB2cSales: () =>
+        Promise.resolve([{ baseMinor: 850_000, currency: "EUR", date: "2026-07-01" }]),
+      options: crossBorder,
+      order: deOrder({ metadata: {} }),
+      raiseAlert: (message) => {
+        alerts.push(message);
+        return Promise.resolve();
+      },
+    });
+    const target = row();
+    await processInvoiceRow(target, deps);
+    // The sale still goes through - the alert exists to buy time, not to block.
+    expect(target.status).toBe("done");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("OSS threshold");
+  });
+
+  it("uses the destination rate once OSS registration is in place", async () => {
+    const { client, deps } = harness({
+      options: {
+        crossBorder: { currencies: ["EUR"], enabled: true },
+        oss: { enabled: true, registered: true },
+      },
+      order: deOrder({
+        items: [
+          {
+            metadata: { tax_supply: "service" },
+            product_title: "Antywirus",
+            quantity: 1,
+            total: 123.45,
+          },
+        ],
+        metadata: {},
+        tax_total: 19.71,
+      }),
+    });
+    const target = row();
+    await processInvoiceRow(target, deps);
+    expect(client.createOssInvoiceAsync).toHaveBeenCalledTimes(1);
+    expect(client.createInvoiceAsync).not.toHaveBeenCalled();
+    const payload = client.createOssInvoiceAsync.mock.calls[0]?.[0];
+    expect(payload.country).toBe("DE");
+    expect(payload.services.every((s: { tax_rate: string }) => s.tax_rate === "19")).toBe(true);
+    expect(target.status).toBe("done");
+  });
+
+  it("parks an OSS sale when checkout did not charge the destination rate", async () => {
+    const { deps } = harness({
+      options: {
+        crossBorder: { currencies: ["EUR"], enabled: true },
+        oss: { enabled: true, registered: true },
+      },
+      order: deOrder({ metadata: {}, tax_total: 0 }),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("review");
+    expect(outcome.message).toContain("no VAT");
+  });
+
+  it("parks a UK consumer instead of inventing a treatment", async () => {
+    const { deps } = harness({
+      options: crossBorder,
+      order: deOrder({
+        billing_address: {
+          address_1: "High Street 1",
+          city: "London",
+          country_code: "GB",
+          first_name: "John",
+          last_name: "Smith",
+          postal_code: "SW1A 1AA",
+        },
+        metadata: {},
+      }),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("review");
+    expect(outcome.message).toContain("GB");
+  });
+});
+
+describe("the invoice-number collision guard", () => {
+  it("parks rather than announcing a number another order already holds", async () => {
+    const { deps, emitted } = harness({
+      listIssuedNumbers: () =>
+        Promise.resolve([{ invoiceNumber: "1/07/2026", orderId: "order_other" }]),
+    });
+    const outcome = await signal(processInvoiceRow(row(), deps));
+    expect(classifyOutcome(outcome, row()).kind).toBe("review");
+    expect(outcome.message).toContain("order_other");
+    expect(outcome.message).toContain("license");
+    // The whole point: nothing downstream ever hears about this invoice.
+    expect(emitted).toHaveLength(0);
+  });
+
+  it("announces normally when the number is unique", async () => {
+    const { deps, emitted } = harness({
+      listIssuedNumbers: () =>
+        Promise.resolve([{ invoiceNumber: "9/07/2026", orderId: "order_other" }]),
+    });
+    await processInvoiceRow(row(), deps);
+    expect(emitted).toHaveLength(1);
+  });
+
+  it("ignores the row's own number on a resume", async () => {
+    const { deps, emitted } = harness({
+      listIssuedNumbers: () =>
+        Promise.resolve([{ invoiceNumber: "1/07/2026", orderId: "order_01" }]),
+    });
+    await processInvoiceRow(row(), deps);
+    expect(emitted).toHaveLength(1);
   });
 });

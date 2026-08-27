@@ -1,12 +1,21 @@
 import { InfaktApiError } from "../infakt/errors";
 import type { InfaktClient } from "../infakt";
+import type { InfaktInvoicePayload, InfaktOssInvoicePayload } from "../infakt/types";
 import type { ResolvedInfaktOptions } from "../options";
 import { buildInfaktInvoicePayload } from "./builder";
+import type { InvoiceOrderInput } from "./builder";
+import type { IssuedNumberClaim } from "./invoice-number";
+import { collisionReason, findNumberCollision } from "./invoice-number";
 import { decideKsef } from "./ksef";
-import { warsawDate } from "./money";
+import { buildOssInvoicePayload } from "./oss-builder";
+import { toMinorUnits, warsawDate } from "./money";
 import type { MedusaOrderLike } from "./order-mapper";
 import { toInvoiceBuyerInput, toInvoiceOrderInput } from "./order-mapper";
 import { evaluatePaidGate } from "./paid";
+import type { VatRegime } from "./regime";
+import { MossRateCache, resolveOrderRegime } from "./resolve-regime";
+import type { EuB2cSale } from "./threshold";
+import { alertMessage } from "./threshold";
 import {
   CRASH_WINDOW_MESSAGE,
   classifyKsefStatus,
@@ -51,10 +60,13 @@ export interface PipelineDeps {
   client: Pick<
     InfaktClient,
     | "createInvoiceAsync"
+    | "createOssInvoiceAsync"
     | "getInvoice"
     | "getInvoiceTaskStatus"
     | "getKsefStatus"
+    | "listMossRates"
     | "markPaid"
+    | "sendInvoiceEmail"
     | "sendToKsef"
   >;
   options: ResolvedInfaktOptions;
@@ -62,6 +74,29 @@ export interface PipelineDeps {
   readOrder: (orderId: string) => Promise<unknown>;
   update: (id: string, patch: Record<string, unknown>) => Promise<void>;
   emitIssued: (payload: IssuedEventPayload) => Promise<void>;
+  /**
+   * Every invoice number already recorded, for the collision guard.
+   *
+   * Optional so existing callers and tests keep working; when it is absent the
+   * guard is skipped and a warning is logged rather than the pipeline failing.
+   * See `invoice-number.ts` for why a collision matters.
+   */
+  listIssuedNumbers?: () => Promise<IssuedNumberClaim[]>;
+  /**
+   * Destination-rate cache, shared across a whole worker run when the caller
+   * supplies one. Absent, each row builds its own, which is correct but chattier.
+   */
+  mossRates?: Pick<MossRateCache, "rateFor">;
+  /**
+   * The intra-EU B2C sales already invoiced, for the OSS threshold counter.
+   *
+   * Absent means "none on the books", which is only correct for a store that has
+   * never made one. `run.ts` supplies the real reader; leaving it unwired would
+   * silently under-count, so the option to omit it exists for tests only.
+   */
+  listEuB2cSales?: () => Promise<EuB2cSale[]>;
+  /** Raise an operational alert. Optional; a missing channel logs instead. */
+  raiseAlert?: (message: string) => Promise<void>;
   /** Injected so the "ride the async task to completion" pause is instant in tests. */
   sleep?: (ms: number) => Promise<void>;
 }
@@ -174,9 +209,11 @@ function guardOrderState(
   }
 
   const currency = (order.currency_code ?? "").toUpperCase();
-  if (currency && currency !== options.currency) {
+  if (currency && !invoiceableCurrency(currency, options)) {
     throw skipSignal(
-      `order is in ${currency}, and this plugin is configured to invoice ${options.currency} only`,
+      options.crossBorderEnabled
+        ? `order is in ${currency}, and this plugin is configured to invoice ${[options.currency, ...options.crossBorderCurrencies].join(", ")}`
+        : `order is in ${currency}, and this plugin is configured to invoice ${options.currency} only`,
     );
   }
 
@@ -255,37 +292,141 @@ async function submitCreate(
   order: MedusaOrderLike,
   deps: PipelineDeps,
 ): Promise<void> {
-  const built = buildInfaktInvoicePayload(
-    toInvoiceOrderInput(order, deps.options.currency),
-    toInvoiceBuyerInput(order, deps.options.nipExtractor),
-    { currency: deps.options.currency, taxSymbol: deps.options.taxSymbol },
-  );
+  // The invoice is denominated in the order's own currency. Domestically that is
+  // always `options.currency`; cross-border it is whatever the customer paid in,
+  // already vetted by the currency gate in `guardOrderState`.
+  const currency = (order.currency_code ?? deps.options.currency).toUpperCase();
+  const buyer = toInvoiceBuyerInput(order, deps.options.nipExtractor);
+  const orderInput = toInvoiceOrderInput(order, currency);
+
+  const regime = await regimeFor(order, buyer.taxId ?? undefined, orderInput, deps);
+  if (regime.kind === "blocked") {
+    // A regime we cannot determine is never approximated. The reason names the
+    // country and the missing evidence, and carries no buyer data.
+    throw reviewSignal(regime.reason);
+  }
+
+  const built =
+    regime.kind === "oss"
+      ? buildOssInvoicePayload(orderInput, buyer, {
+          country: regime.country,
+          currency,
+          rate: regime.rate,
+          serviceType: deps.options.ossServiceType,
+        })
+      : buildInfaktInvoicePayload(orderInput, buyer, {
+          currency,
+          regime,
+          taxSymbol: deps.options.taxSymbol,
+        });
   if (!built.ok) {
-    // Reasons are PII-free by construction; see builder.ts.
+    // Reasons are PII-free by construction; see builder.ts and oss-builder.ts.
     throw reviewSignal(built.reason);
   }
 
+  // An OSS invoice is always a consumer document, so it is never a KSeF
+  // candidate and never carries a tax id.
+  const isCompany = "isCompany" in built ? built.isCompany : false;
+  const nip = "nip" in built ? built.nip : undefined;
+
   const decision = decideKsef(
-    { isCompany: built.isCompany, nip: built.nip, orderId: row.order_id },
+    { isCompany, nip, orderId: row.order_id },
     deps.options.ksefMode,
     deps.options.ksefDecide,
   );
 
-  // The KSeF decision is frozen here, alongside the claim. Re-deriving it on a
-  // later tick would let a mid-flight config change silently reclassify an invoice
-  // that has already been issued.
+  // The KSeF decision and the VAT regime are frozen here, alongside the claim.
+  // Re-deriving either on a later tick would let a mid-flight config change
+  // silently reclassify an invoice that has already been issued.
   await patch(row, deps, {
-    is_company: built.isCompany,
+    is_company: isCompany,
     ksef_decision_reason: decision.reason,
     ksef_required: decision.file,
     submit_started_at: new Date(),
+    vat_base_minor: regime.kind === "eu_b2c_domestic_rate" ? euB2cBaseMinor(orderInput) : null,
+    vat_country: regime.kind === "domestic" ? null : regime.country,
+    vat_currency: regime.kind === "eu_b2c_domestic_rate" ? currency : null,
+    vat_rate: regime.kind === "oss" ? regime.rate : null,
+    vat_regime: regime.kind,
   });
 
-  const task = await deps.client.createInvoiceAsync(built.payload);
+  // Warn while there is still time to register. The block at 100% is a backstop,
+  // not the notification mechanism: by the time it fires, sales are already
+  // being refused.
+  if (regime.kind === "eu_b2c_domestic_rate" && regime.alert) {
+    await raiseThresholdAlert(regime.usedRatio, deps);
+  }
+
+  const task =
+    regime.kind === "oss"
+      ? await deps.client.createOssInvoiceAsync(built.payload as InfaktOssInvoicePayload)
+      : await deps.client.createInvoiceAsync(built.payload as InfaktInvoicePayload);
   await patch(row, deps, { task_reference: task.invoiceTaskReferenceNumber });
 
   // Try to ride the async task to completion in this run.
   await (deps.sleep ?? defaultSleep)(CREATE_SETTLE_MS);
+}
+
+/**
+ * The regime for one order, or plain domestic when cross-border is off.
+ *
+ * Short-circuiting on `crossBorderEnabled` is what guarantees a store that has
+ * not opted in behaves exactly as it did before: no classification, no VIES
+ * read, no rate lookup, and a `domestic` regime that makes the builder emit the
+ * identical payload it emitted before this feature existed.
+ */
+async function regimeFor(
+  order: MedusaOrderLike,
+  taxId: string | undefined,
+  orderInput: InvoiceOrderInput,
+  deps: PipelineDeps,
+): Promise<VatRegime> {
+  if (!deps.options.crossBorderEnabled) {
+    return { kind: "domestic", taxSymbol: deps.options.taxSymbol };
+  }
+  const rates = deps.mossRates ?? new MossRateCache(deps.client);
+  return resolveOrderRegime(
+    order,
+    taxId,
+    {
+      alertRatio: deps.options.ossAlertRatio,
+      crossBorderEnabled: true,
+      domesticTaxSymbol: deps.options.taxSymbol,
+      ossEnabled: deps.options.ossEnabled,
+      ossRegistered: deps.options.ossRegistered,
+      thresholds: deps.options.ossThresholds,
+      viesFallback: deps.options.viesFallback,
+    },
+    rates,
+    deps.listEuB2cSales ?? (() => Promise.resolve([])),
+    pendingEuB2cSale(orderInput, order),
+  );
+}
+
+/**
+ * This order expressed as a candidate intra-EU B2C sale.
+ *
+ * The taxable base is net, because the threshold is measured on net value. It is
+ * derived as gross minus the tax the checkout charged; when the order reports no
+ * tax at all the gross IS the net, which is the conservative reading - it counts
+ * the larger number toward the limit rather than the smaller.
+ */
+function pendingEuB2cSale(orderInput: InvoiceOrderInput, order: MedusaOrderLike): EuB2cSale {
+  const gross = toMinorUnits(orderInput.total) ?? 0;
+  const tax = toMinorUnits(orderInput.taxTotal ?? null) ?? 0;
+  return {
+    baseMinor: Math.max(gross - tax, 0),
+    currency: (order.currency_code ?? "").toUpperCase(),
+    date: warsawDate(order.created_at ?? null),
+  };
+}
+
+/** Whether this plugin invoices orders in the given currency at all. */
+function invoiceableCurrency(currency: string, options: ResolvedInfaktOptions): boolean {
+  if (currency === options.currency.toUpperCase()) {
+    return true;
+  }
+  return options.crossBorderEnabled && options.crossBorderCurrencies.includes(currency);
 }
 
 /** Step 2: turn the accepted task into a known invoice uuid. */
@@ -392,6 +533,18 @@ async function emitIssued(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
   if (!row.invoice_uuid) {
     throw reviewSignal("no invoice uuid to announce");
   }
+
+  // The last checkpoint before the invoice number reaches anything that spends
+  // money. Downstream license fulfilment treats the number as a globally unique
+  // handle, and it is not one across inFakt's document families - so a duplicate
+  // parks here rather than becoming one buyer receiving another's license keys.
+  await guardNumberCollision(row, deps);
+
+  // A foreign buyer cannot collect an invoice from KSeF, so filing it is not
+  // delivering it. Best-effort on purpose: the invoice is already issued and a
+  // bounced email must not undo it or park the row.
+  await deliverCrossBorderInvoice(row, deps);
+
   try {
     await deps.emitIssued({
       invoice_number: row.invoice_number ?? null,
@@ -455,4 +608,94 @@ async function patch(
 ): Promise<void> {
   await deps.update(row.id, changes);
   Object.assign(row, changes);
+}
+
+/**
+ * Refuse to announce an invoice whose number another order already claimed.
+ *
+ * Parks rather than continues. The alternative - announcing anyway - hands a
+ * non-unique reference to a system that buys and delivers license keys under it,
+ * and the failure mode there is one customer receiving another's credentials,
+ * which cannot be undone once the email is sent.
+ *
+ * When no lookup is wired the guard logs and continues, so this stays additive
+ * for existing callers rather than a hard new requirement.
+ */
+async function guardNumberCollision(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
+  if (!deps.listIssuedNumbers) {
+    deps.logger.warn(
+      `[medusa-infakt] no invoice-number lookup wired; skipping the collision guard for order ${row.order_id}`,
+    );
+    return;
+  }
+  const number = row.invoice_number;
+  if (!number) {
+    return;
+  }
+  const existing = await deps.listIssuedNumbers();
+  const other = findNumberCollision(number, row.order_id, existing);
+  if (other) {
+    throw reviewSignal(collisionReason(number, other));
+  }
+}
+
+/**
+ * Email a cross-border invoice to the buyer.
+ *
+ * Domestic invoices are deliberately untouched: a Polish B2B buyer collects
+ * theirs from KSeF, and a Polish consumer's delivery is however the store
+ * already handles it. Nothing about the existing path changes.
+ */
+async function deliverCrossBorderInvoice(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
+  if (!(deps.options.emailCrossBorderInvoice && isCrossBorderRegime(row.vat_regime))) {
+    return;
+  }
+  if (!row.invoice_uuid) {
+    return;
+  }
+  try {
+    await deps.client.sendInvoiceEmail(row.invoice_uuid);
+  } catch (error) {
+    deps.logger.warn(
+      `[medusa-infakt] could not email the cross-border invoice for order ${row.order_id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/** Whether a persisted regime value describes a sale that left Poland. */
+function isCrossBorderRegime(regime: string | null | undefined): boolean {
+  return regime === "reverse_charge" || regime === "export_services" || regime === "oss";
+}
+
+/** The net taxable base this order contributes to the intra-EU B2C counter. */
+function euB2cBaseMinor(orderInput: InvoiceOrderInput): number {
+  const gross = toMinorUnits(orderInput.total) ?? 0;
+  const tax = toMinorUnits(orderInput.taxTotal ?? null) ?? 0;
+  return Math.max(gross - tax, 0);
+}
+
+/**
+ * Tell someone the OSS threshold is approaching.
+ *
+ * Best-effort: an alert that cannot be delivered must not stop an invoice that is
+ * otherwise correct. It degrades to a warning in the log, which is still visible,
+ * rather than to silence.
+ */
+async function raiseThresholdAlert(usedRatio: number, deps: PipelineDeps): Promise<void> {
+  const message = alertMessage(usedRatio);
+  if (!deps.raiseAlert) {
+    deps.logger.warn(`[medusa-infakt] ${message}`);
+    return;
+  }
+  try {
+    await deps.raiseAlert(message);
+  } catch (error) {
+    deps.logger.warn(
+      `[medusa-infakt] could not raise the OSS threshold alert: ${
+        error instanceof Error ? error.message : String(error)
+      } - ${message}`,
+    );
+  }
 }

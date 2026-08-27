@@ -32,6 +32,7 @@ follows from that.
 - [Where the buyer's NIP comes from](#where-the-buyers-nip-comes-from)
 - [KSeF](#ksef)
 - [Operator runbook: needs_review](#operator-runbook-needs_review)
+- [Cross-border VAT](#cross-border-vat)
 - [Cross-plugin event](#cross-plugin-event)
 - [Admin API](#admin-api)
 - [Privacy](#privacy)
@@ -167,8 +168,19 @@ module the plugin registers (there is one: `infakt`).
 | `apiKey`                | `string`                               | -                    | **The enable switch.** inFakt API key, sent as `X-inFakt-ApiKey`. Absent or blank leaves the plugin inert; see below. Read it from an env var. |
 | `environment`           | `"production" \| "sandbox"`            | `"production"`       | See the sandbox note above.                                                                                                                    |
 | `startDate`             | `string`                               | -                    | **Optional**, strict `YYYY-MM-DD`. Orders placed before it are skipped. Absent means no floor. See below.                                      |
-| `currency`              | `string`                               | `"PLN"`              | Orders in any other currency are skipped with a reason.                                                                                        |
-| `taxSymbol`             | `string`                               | `"23"`               | inFakt VAT rate symbol applied to every line.                                                                                                  |
+| `currency`              | `string`                               | `"PLN"`              | The domestic currency. Orders in any other currency are skipped unless `crossBorder` opts them in.                                             |
+| `taxSymbol`             | `string`                               | `"23"`               | inFakt VAT rate symbol for **domestic** lines. Cross-border lines are decided by the VAT regime, not by this.                                  |
+| `crossBorder.enabled`   | `boolean`                              | `false`              | **Master switch for all cross-border VAT.** Off means the plugin behaves exactly as it did before this feature existed. See below.             |
+| `crossBorder.currencies`| `string[]`                             | `[]`                 | Extra currencies to invoice, e.g. `["EUR"]`. Only consulted when `crossBorder.enabled`.                                                        |
+| `crossBorder.viesFallback` | `"review" \| "consumer"`             | `"review"`           | What an unreachable VIES means. `review` parks the order; `consumer` charges destination VAT. Never zero-rates either way.                     |
+| `crossBorder.viesBaseUrl` | `string`                             | EU REST endpoint     | Override the VIES endpoint.                                                                                                                    |
+| `crossBorder.viesTimeoutMs` | `number`                           | `8000`               | VIES request timeout.                                                                                                                          |
+| `crossBorder.emailInvoice` | `boolean`                           | `true`               | Email cross-border invoices to the buyer. A foreign buyer cannot collect one from KSeF.                                                        |
+| `oss.enabled`           | `boolean`                              | `false`              | Switches the OSS code path on. Requires `crossBorder.enabled`. **Read the OSS warning below before enabling.**                                 |
+| `oss.registered`        | `boolean`                              | `false`              | Whether the company actually holds a union OSS registration (VIU-R). Without it, EU consumers get the domestic rate below the threshold.       |
+| `oss.thresholds`        | `Record<string, number>`               | EUR 10 000 / PLN 42 000 | Per-currency intra-EU B2C limits, minor units. A currency with no entry parks the order rather than being excluded from the count.          |
+| `oss.alertRatio`        | `number`                               | `0.8`                | Warn at this fraction of the threshold, so there is time to register before orders start parking.                                              |
+| `oss.serviceType`       | `"electronic" \| "broadcasting" \| "telecommunications"` | `"electronic"` | inFakt's service taxonomy. Software and license keys are `electronic`.                                     |
 | `triggerEvent`          | `"payment.captured" \| "order.placed"` | `"payment.captured"` | Which event queues an order. Medusa has no `order.paid` event.                                                                                 |
 | `ksef.mode`             | `"nip-only" \| "all" \| "never"`       | `"nip-only"`         | Who gets filed. `never` is for development only.                                                                                               |
 | `ksef.requireActive`    | `boolean`                              | `true` in production | Verify the account's KSeF integration and refuse to run when it is not active.                                                                 |
@@ -177,6 +189,156 @@ module the plugin registers (there is one: `infakt`).
 | `emitIssuedEvent`       | `boolean`                              | `true`               | Emit `infakt.invoice.issued` once an invoice is issued.                                                                                        |
 | `timeoutMs`             | `number`                               | `60000`              | Per-request timeout for inFakt calls.                                                                                                          |
 | `settingsEncryptionKey` | `string`                               | -                    | Encrypts an admin-set `apiKey` override at rest. Required before one can be saved from Settings -> inFakt; see below. Read it from an env var. |
+
+## Cross-border VAT
+
+**Off by default.** Without `crossBorder.enabled`, this plugin invoices the domestic
+currency only, puts `taxSymbol` on every line, and skips everything else - exactly as
+it did before cross-border support existed. Nothing below applies until you opt in.
+
+### The decision tree
+
+Every order gets exactly one regime, decided in `src/lib/invoicing/regime.ts`:
+
+| Destination | Buyer | Regime | Rate | On the invoice | VAT-UE? |
+| --- | --- | --- | --- | --- | --- |
+| Poland | anyone | `domestic` | `taxSymbol` (23) | nothing extra | no |
+| Another member state | business, VAT id **confirmed by VIES** | `reverse_charge` | `np` | "Odwrotne obciazenie / Reverse charge" + basis | **yes** |
+| Another member state | consumer, **below** the threshold, not OSS-registered | `eu_b2c_domestic_rate` | `taxSymbol` (23) | nothing extra | no |
+| Another member state | consumer, **above** the threshold, not OSS-registered | **blocked** | - | - | - |
+| Another member state | consumer, OSS-**registered** | `oss` | destination country's rate | OSS document | no |
+| Outside the EU (incl. GB) | business | `export_services` | `np` | out-of-scope annotation | **no** |
+| Outside the EU | consumer | **blocked** | - | - | - |
+
+The EU-consumer row is the one to read twice. **Today this store is not registered
+for OSS**, so an EU consumer is charged Polish 23% - not the destination rate, and
+emphatically not zero. That is correct *because* of the intra-EU B2C threshold, and
+it stops being correct the moment the threshold is crossed.
+
+Anything the tree cannot answer becomes `needs_review` with a reason, never a guess.
+A late invoice is a support ticket; a wrong one is a liability.
+
+### Three things that are easy to get wrong
+
+**`np` is not `0`.** inFakt's `0` is a Polish zero *rate*; `np` ("nie podlega") means the
+supply is outside the scope of Polish VAT. Cross-border services are `np`. There is no
+reverse-charge rate symbol any more - inFakt's `oo` expired on 2019-11-01 with the
+domestic reverse charge - so the legal annotation is carried as invoice text.
+
+**"Not Poland" does not mean "no VAT".** An EU consumer is never zero-rated. Below the
+threshold they owe Polish VAT; above it (or once we register for OSS) they owe their
+own country's. Zero is wrong in both directions.
+
+**A reverse charge and an export of services are not the same thing.** They carry the
+same `np`, but a reverse charge belongs in the VAT-UE summary and an export must never
+appear there. They are separate regimes for that reason alone.
+
+### B2B vs B2C, and what VIES has to do with it
+
+A VAT id that is merely *present* is not one that is *valid*. A buyer is treated as a
+business only when all three hold: an id is supplied, VIES confirms it, and its country
+matches the billing country. Anything else is a consumer or a park.
+
+VIES has three outcomes, not two, and the third one matters:
+
+- **valid** - reverse charge.
+- **invalid** - the buyer is a consumer; destination VAT applies.
+- **unavailable** - VIES or a member state's node is down. By default the order **parks**.
+
+Parking is the default because both automatic answers are wrong in different directions:
+zero-rating rests on evidence we do not have, and charging destination VAT silently
+overrides a business customer's own statement about who they are. Set
+`crossBorder.viesFallback: "consumer"` to never delay a paid order - that over-collects,
+which a corrective invoice can fix, rather than under-collecting, which it cannot.
+Neither setting can produce a reverse charge on an unconfirmed number.
+
+Validate **at checkout** and cache the result on the order (`order.metadata.vies`), so a
+routine VIES outage cannot strand an order the customer has already paid for. The reader
+accepts `true`/`false`, `"valid"`, or `{ status, checkedAt, consultationNumber }`.
+
+### Products must be classified
+
+The place of supply of a *service* follows the customer; the place of supply of *goods*
+follows the goods. So each product needs a marker - `metadata.tax_supply` set to
+`"service"` or `"goods"`, on the line, the variant or the product.
+
+Unmarked products are **not** assumed to be services. They keep invoicing normally
+domestically (a Polish sale is 23% either way) and park on the first foreign order,
+naming the product. That means no catalogue backfill is needed before shipping this,
+and no silent wrong answer either.
+
+### The intra-EU B2C threshold
+
+A supplier established in one member state may keep taxing intra-EU B2C sales at its
+own rate while the combined net value of those sales stays at or below **EUR 10 000**,
+measured across the **current and previous** calendar year (art. 28k ust. 2 ustawy o
+VAT; Directive 2006/112 art. 59c). Above it, the place of supply moves to each
+consumer's country and OSS registration is required.
+
+Three properties of that rule shape the implementation:
+
+1. **Crossing flips the treatment mid-year, on the transaction that crosses it** - not
+   at a period boundary. So the counter is consulted *before* an invoice is issued,
+   and the pending sale is included in the total before comparing.
+2. **There is no safe fallback above the line.** Below it, 23% is right because of the
+   threshold; above it the identical 23% is wrong. So a crossing order is **parked**,
+   never issued at either rate.
+3. **Registration is not instantaneous.** An alert fires at `oss.alertRatio` (default
+   **80%**) through the same admin feed as a parked invoice, so the owner has room to
+   file VIU-R before anything starts blocking. The block at 100% is a backstop, not
+   the notification mechanism.
+
+**Where the counter lives.** It is derived from the invoices themselves: every
+`eu_b2c_domestic_rate` row stores `vat_base_minor` and `vat_currency`, and the counter
+sums those rows. There is no separate ledger to drift out of sync, and an accountant
+can audit the figure by listing the same rows they would anyway. Only EU B2C counts -
+reverse-charge B2B and non-EU sales are outside the threshold entirely.
+
+**The currency approximation, stated plainly.** The limit is EUR 10 000 with a
+statutory PLN equivalent of 42 000 PLN. Sales may be in either. Doing this exactly
+needs NBP rates per transaction date, which this plugin does not have and will not
+invent. Instead it tracks a running total per currency, expresses each as a fraction
+of that currency's own limit, and sums the fractions. A currency with no configured
+limit does **not** get skipped - it parks the order, because silently not counting a
+currency is the one failure mode the whole mechanism exists to prevent.
+
+### OSS: read this before enabling
+
+`oss.enabled` and `oss.registered` are separate flags, and both default to false.
+`enabled` switches the code path on; `registered` asserts that destination-rate
+invoicing is actually lawful for this company. Setting `enabled` without `registered`
+changes nothing about which regime an EU consumer gets.
+
+Two further reasons OSS is gated:
+
+**1. Checkout has to charge the destination rate first.** This plugin decides the rate
+from inFakt's own `/moss_vat_rates.json`, but the money was already taken by Medusa at
+whatever rate its tax module was configured with. If those disagree, no correct invoice
+exists - it would either misstate the tax or misstate the total. The builder therefore
+cross-checks and parks on a mismatch. If your non-Polish tax regions have no rate
+configured, **every OSS order will park** with a reason saying so. That is intended.
+
+**2. OSS invoices have their own numbering series.** They are a separate document family
+at inFakt. Downstream, the invoice number is the reference license keys are bought and
+recovered under, and it is not unique across families - a series that restarts at 1 can
+collide with an existing VAT invoice number and cause one order's keys to be delivered
+against another's. A collision guard (`src/lib/invoicing/invoice-number.ts`) refuses to
+announce a number another order already holds, but the numbering inFakt actually assigns
+to OSS invoices has not been confirmed against a real document.
+
+### Delivery is not filing
+
+A Polish B2B buyer collects their invoice from KSeF. A foreign buyer cannot - they have
+no access to it - so filing a cross-border invoice is not the same as delivering it. The
+pipeline emails cross-border invoices via inFakt, best-effort, controlled by
+`crossBorder.emailInvoice`. Foreign tax ids are still filed to KSeF: `ksef.mode:
+"nip-only"` keys on *any* tax id, not only a Polish NIP.
+
+### Enabling a currency also arms key delivery
+
+Today a non-domestic order is skipped, which means no invoice, no
+`infakt.invoice.issued`, and therefore no downstream license-key purchase or delivery.
+Adding a currency to `crossBorder.currencies` turns all of that on for those orders.
 
 ### Why `currency` and `taxSymbol` have defaults at all
 
@@ -642,6 +804,15 @@ and usually names the fix, alongside the same operator actions listed below.
 | _line total N does not match order total M_                       | The order has a discount, credit line or fee this plugin does not model.       | Decide what the invoice should say. Invoice it manually in inFakt and **Link invoice**, or **Skip** with a reason.                |
 | _buyer address is incomplete (missing: ...)_                      | The billing address lacks a field inFakt requires.                             | Fix the order's billing address, then **Retry**.                                                                                  |
 | _buyer tax id does not normalize to a 10-digit NIP (N digits...)_ | The captured tax id is not a Polish NIP - often a foreign VAT id.              | Correct or remove the tax id on the order, then **Retry**. Removing it makes the order a consumer invoice, outside KSeF.          |
+| _...could not be confirmed against VIES..._                       | VIES, or that member state's node, was unreachable. Not a rejection.           | **Retry** once VIES is back. If this recurs, validate at checkout and cache on the order, or set `crossBorder.viesFallback`.      |
+| _the VAT id was issued by X but the billing country is Y_         | The two pieces of evidence disagree about where the customer belongs.          | Correct whichever is wrong on the order, then **Retry**. Do not guess - the place of supply follows the customer.                |
+| _order to X contains products with no VAT classification (...)_   | A product has no `metadata.tax_supply`. Only blocks cross-border orders.       | Tag the named product `"service"` or `"goods"`, then **Retry**.                                                                   |
+| _order to X mixes services and goods_                             | One invoice would need two different VAT treatments.                          | Split the order. The plugin will not pick one treatment for both.                                                                |
+| _sale to a consumer in X, outside the EU_                         | Union OSS does not cover it and the non-union scheme is unavailable to us.     | A registration decision, not a retry. Escalate. GB in particular needs UK VAT registration from the first sale.                  |
+| _the order was charged no VAT, but an OSS sale needs..._          | Checkout did not apply the destination rate - the tax region is unconfigured.  | Configure the destination tax region in Medusa. Until then no correct OSS invoice exists for that order.                          |
+| _this sale crosses the intra-EU B2C threshold..._                 | EUR 10 000 of EU consumer sales reached without an OSS registration.          | **Register for OSS (VIU-R).** Not a retry: no correct invoice exists for this order until registration is in place.               |
+| _no intra-EU B2C threshold is configured for X_                   | An EU consumer sale in a currency with no configured limit.                    | Add the currency to `oss.thresholds`, or stop selling to EU consumers in it.                                                      |
+| _invoice number N is already recorded against order X_            | Two orders hold the same invoice number, across inFakt document families.      | **Do not retry blindly.** Downstream license keys are keyed on this number; resolve which invoice belongs to which order first.   |
 | _buyer has a NIP but no company name_                             | A B2B invoice needs both.                                                      | Add the company name to the billing address, then **Retry**.                                                                      |
 | _inFakt rejected the invoice: ..._                                | inFakt's validation refused the payload; its own message follows.              | Fix what it names, then **Retry**. Nothing was issued.                                                                            |
 | _KSeF rejected the invoice: ..._                                  | The invoice exists in inFakt but KSeF refused it. The description is KSeF's.   | Fix it in inFakt, then **Retry** - the row resumes at the KSeF step and does not re-create the invoice.                           |

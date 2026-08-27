@@ -76,6 +76,16 @@ export interface InvoiceStateRow {
   skip_reason?: string | null;
   completed_at?: Date | string | null;
   adopted_at?: Date | string | null;
+  /**
+   * The VAT regime frozen at build time. Null on rows created before
+   * cross-border support existed, and read as "domestic" everywhere.
+   */
+  vat_regime?: string | null;
+  vat_country?: string | null;
+  vat_rate?: string | null;
+  /** Net taxable base for an intra-EU B2C sale. Feeds the OSS threshold counter. */
+  vat_base_minor?: unknown;
+  vat_currency?: string | null;
 }
 
 /**
