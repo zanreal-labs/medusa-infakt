@@ -20,6 +20,7 @@ beforeEach(() => {
     deferred: 0,
     failed: 0,
     processed: 1,
+    reArmed: 0,
     review: 0,
     skippedRows: 0,
   });
@@ -249,6 +250,7 @@ describe("enqueueInvoiceSubscriber: issuing the invoice the moment payment lands
       deferred: 0,
       failed: 0,
       processed: 0,
+      reArmed: 0,
       review: 0,
       skipped: "another invoicing run holds the lock",
       skippedRows: 0,

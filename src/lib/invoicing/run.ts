@@ -14,6 +14,11 @@ import type { InvoiceRow, PipelineDeps } from "./pipeline";
 import { warsawDate } from "./money";
 import { MossRateCache } from "./resolve-regime";
 import { classifyOutcome } from "./state-machine";
+import { toInvoiceBuyerInput } from "./order-mapper";
+import type { OperatorActionConfig } from "./operator-actions";
+import { isParkedOnMissingAddress, planAddressReArm } from "./re-arm";
+import type { InvoiceStateRow } from "./state-machine";
+import type { MedusaOrderLike } from "./order-mapper";
 
 /**
  * One invoicing run, shared by both things that can start one.
@@ -58,6 +63,8 @@ export interface InvoicingRunSummary {
   failed: number;
   /** Rows parked for a human. */
   review: number;
+  /** Parked rows put back in the queue because their blocker resolved itself. */
+  reArmed: number;
 }
 
 export const emptySummary = (): InvoicingRunSummary => ({
@@ -65,6 +72,7 @@ export const emptySummary = (): InvoicingRunSummary => ({
   deferred: 0,
   failed: 0,
   processed: 0,
+  reArmed: 0,
   review: 0,
   skippedRows: 0,
 });
@@ -229,6 +237,13 @@ async function drainDueRows(
   input: InvoicingRunInput,
 ): Promise<InvoicingRunSummary> {
   const summary = emptySummary();
+
+  // Before asking what is due, ask whether anything parked has un-parked itself.
+  // Ordered first so a row re-armed here is picked up by THIS run rather than the
+  // next one - an invoice that waited for an address should not then wait for a
+  // tick as well.
+  summary.reArmed = await reArmResolvedAddresses(container, infakt, logger, input);
+
   const rows = (await (input.orderId
     ? infakt.listDueInvoicesForOrder(input.orderId)
     : infakt.listDueInvoices(BATCH_LIMIT))) as unknown as InvoiceRow[];
@@ -249,6 +264,119 @@ async function drainDueRows(
     }
   }
   return summary;
+}
+
+/**
+ * The config the operator `retry` action needs, built without touching inFakt.
+ *
+ * Deliberately not `buildDeps`: that constructs an API client, and the re-check
+ * must cost nothing on the overwhelmingly common tick where nothing is parked.
+ */
+async function buildOperatorActionConfig(
+  infakt: InfaktModuleService,
+): Promise<OperatorActionConfig> {
+  const options = await infakt.getEffectiveOptions();
+  return {
+    emitEvent: infakt.resolvedOptions.emitIssuedEvent,
+    ksefDecide: options.ksefDecide,
+    ksefMode: options.ksefMode,
+  };
+}
+
+/**
+ * Just enough of an order to decide whether its buyer address is complete.
+ *
+ * The two address relations and nothing else - this runs on a path that must stay
+ * cheap, and the only question being asked is whether three fields are populated.
+ */
+async function loadOrderForReArm(
+  container: MedusaContainer,
+  orderId: string,
+): Promise<MedusaOrderLike | null> {
+  const query = container.resolve<{
+    graph: (input: {
+      entity: string;
+      fields: string[];
+      filters?: Record<string, unknown>;
+    }) => Promise<{ data?: unknown[] }>;
+  }>(ContainerRegistrationKeys.QUERY);
+  const { data } = await query.graph({
+    entity: "order",
+    fields: ["id", "metadata", "billing_address.*", "shipping_address.*"],
+    filters: { id: orderId },
+  });
+  return ((data ?? [])[0] as MedusaOrderLike | undefined) ?? null;
+}
+
+/**
+ * Put back in the queue any row parked ONLY because the buyer address was
+ * missing, whose order now has one.
+ *
+ * The narrow case, deliberately. See `re-arm.ts` for why this is the one park
+ * reason a machine may resolve and why everything else still needs a human.
+ *
+ * Scoped to `input.orderId` when the caller named one, so the payment fast path
+ * cannot sweep the whole ledger as a side effect of one order's payment landing.
+ *
+ * Every failure is swallowed per row: a row that cannot be re-armed stays parked,
+ * which is exactly where it already was. This must never be able to fail a run.
+ */
+async function reArmResolvedAddresses(
+  container: MedusaContainer,
+  infakt: InfaktModuleService,
+  logger: Logger,
+  input: InvoicingRunInput,
+): Promise<number> {
+  let reArmed = 0;
+  try {
+    const parked = (await infakt.listInfaktInvoices({
+      status: "needs_review",
+      ...(input.orderId ? { order_id: [input.orderId] } : {}),
+    })) as unknown as InvoiceStateRow[];
+
+    const candidates = parked.filter((row) => isParkedOnMissingAddress(row));
+    if (candidates.length === 0) {
+      return 0;
+    }
+
+    const config = await buildOperatorActionConfig(infakt);
+
+    for (const row of candidates) {
+      const orderId = (row as unknown as InvoiceRow).order_id;
+      try {
+        const order = await loadOrderForReArm(container, orderId);
+        // The tax id plays no part in an address check, so the extractor is a
+        // stub - `toInvoiceBuyerInput` is reused only so the address derivation
+        // here is the SAME one the builder's gate applies. Two derivations could
+        // disagree, and a re-arm that disagrees with the gate is an infinite loop.
+        const buyer = order ? toInvoiceBuyerInput(order, () => undefined) : null;
+        const plan = planAddressReArm(row, buyer, config);
+        if (!plan) {
+          continue;
+        }
+        if (!plan.ok) {
+          logger.info(
+            `[${input.source}] not re-arming invoice for order ${orderId}: ${plan.reason}`,
+          );
+          continue;
+        }
+        await infakt.updateInfaktInvoices({ id: (row as unknown as InvoiceRow).id, ...plan.patch });
+        reArmed += 1;
+        logger.info(
+          `[${input.source}] order ${orderId} now has a complete buyer address, so its parked invoice was put back in the queue (${plan.note}).`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(
+          `[${input.source}] could not re-check the parked invoice for order ${orderId}: ${message}. It stays parked.`,
+        );
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(`[${input.source}] the parked-invoice re-check did not run: ${message}.`);
+  }
+  return reArmed;
 }
 
 /**
