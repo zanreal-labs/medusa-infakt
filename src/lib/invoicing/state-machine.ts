@@ -1,4 +1,4 @@
-import { InfaktApiError } from "../infakt/errors";
+import { describeError, InfaktApiError } from "../infakt/errors";
 
 /**
  * The durable state machine's pure rules.
@@ -176,7 +176,7 @@ export function classifyOutcome(cause: unknown, row: Pick<InvoiceStateRow, "atte
     };
   }
 
-  const message = truncateError(cause instanceof Error ? cause.message : String(cause));
+  const message = truncateError(describeError(cause));
   const httpStatus = cause instanceof InfaktApiError ? cause.httpStatus : null;
   const permanent =
     (cause instanceof PipelineSignal && cause.kind === "review") ||

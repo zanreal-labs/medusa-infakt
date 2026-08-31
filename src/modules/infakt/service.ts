@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { MedusaError, MedusaService } from "@medusajs/framework/utils";
 import { encryptSecret } from "../../lib/crypto/secret-box";
-import { InfaktClient } from "../../lib/infakt";
+import { describeError, InfaktClient } from "../../lib/infakt";
 import type { InfaktKsefIntegration } from "../../lib/infakt";
 import {
   isInvoicingForceDisabledByEnv,
@@ -664,7 +664,7 @@ export default class InfaktModuleService extends MedusaService({
       });
       return integration;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = describeError(error);
       await this.updateInfaktRunStates({
         id: RUN_STATE_SINGLETON_KEY,
         ksef_checked_at: new Date(),

@@ -5,6 +5,7 @@ import type {
   MedusaContainer,
 } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
+import { describeError } from "../infakt/errors";
 import { INFAKT_MODULE } from "../../modules/infakt";
 import { runHealth } from "../../modules/infakt/claim-logic";
 import type InfaktModuleService from "../../modules/infakt/service";
@@ -149,7 +150,7 @@ export async function runInvoicing(
     outcome = { lastError: health.lastError, processed: summary.processed, status: health.status };
     logRunSummary(logger, summary, source);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.error(`[${source}] run failed: ${message}`);
     outcome = { lastError: message, processed: summary.processed, status: "error" };
     throw error;
@@ -366,14 +367,14 @@ async function reArmResolvedAddresses(
           `[${input.source}] order ${orderId} now has a complete buyer address, so its parked invoice was put back in the queue (${plan.note}).`,
         );
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = describeError(error);
         logger.warn(
           `[${input.source}] could not re-check the parked invoice for order ${orderId}: ${message}. It stays parked.`,
         );
       }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     logger.warn(`[${input.source}] the parked-invoice re-check did not run: ${message}.`);
   }
   return reArmed;
@@ -401,9 +402,7 @@ async function notifyNeedsReview(
   } catch (error) {
     logger.warn(
       `[${source}] could not raise an admin notification for order ${input.orderId} ` +
-        `(the row is still marked needs_review): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `(the row is still marked needs_review): ${describeError(error)}`,
     );
   }
 }
@@ -493,9 +492,7 @@ async function buildDeps(
         // Same policy as every other alert here: never fail a run over a missing
         // notification provider. The warning still reaches the log.
         logger.warn(
-          `[medusa-infakt] could not raise the OSS threshold alert: ${
-            error instanceof Error ? error.message : String(error)
-          } - ${message}`,
+          `[medusa-infakt] could not raise the OSS threshold alert: ${describeError(error)} - ${message}`,
         );
       }
     },
