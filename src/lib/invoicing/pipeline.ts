@@ -1,4 +1,4 @@
-import { InfaktApiError } from "../infakt/errors";
+import { describeError, InfaktApiError } from "../infakt/errors";
 import type { InfaktClient } from "../infakt";
 import type { InfaktInvoicePayload, InfaktOssInvoicePayload } from "../infakt/types";
 import type { ResolvedInfaktOptions } from "../options";
@@ -555,9 +555,7 @@ async function emitIssued(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
     });
   } catch (error) {
     deps.logger.warn(
-      `[medusa-infakt] could not emit infakt.invoice.issued for order ${row.order_id}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `[medusa-infakt] could not emit infakt.invoice.issued for order ${row.order_id}: ${describeError(error)}`,
     );
   }
   await patch(row, deps, { event_emitted_at: new Date() });
@@ -585,9 +583,7 @@ async function markPaidBestEffort(
     await deps.client.markPaid(row.invoice_uuid, warsawDate());
   } catch (error) {
     deps.logger.warn(
-      `[medusa-infakt] mark-paid failed for invoice ${row.invoice_uuid} (order ${order.id}): ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `[medusa-infakt] mark-paid failed for invoice ${row.invoice_uuid} (order ${order.id}): ${describeError(error)}`,
     );
   }
 }
@@ -657,9 +653,7 @@ async function deliverCrossBorderInvoice(row: InvoiceRow, deps: PipelineDeps): P
     await deps.client.sendInvoiceEmail(row.invoice_uuid);
   } catch (error) {
     deps.logger.warn(
-      `[medusa-infakt] could not email the cross-border invoice for order ${row.order_id}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `[medusa-infakt] could not email the cross-border invoice for order ${row.order_id}: ${describeError(error)}`,
     );
   }
 }
@@ -693,9 +687,7 @@ async function raiseThresholdAlert(usedRatio: number, deps: PipelineDeps): Promi
     await deps.raiseAlert(message);
   } catch (error) {
     deps.logger.warn(
-      `[medusa-infakt] could not raise the OSS threshold alert: ${
-        error instanceof Error ? error.message : String(error)
-      } - ${message}`,
+      `[medusa-infakt] could not raise the OSS threshold alert: ${describeError(error)} - ${message}`,
     );
   }
 }

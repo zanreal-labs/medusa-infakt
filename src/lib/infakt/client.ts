@@ -1,4 +1,4 @@
-import { InfaktApiError } from "./errors";
+import { describeError, InfaktApiError } from "./errors";
 import { INFAKT_ENDPOINTS } from "./types";
 import type {
   InfaktAsyncTask,
@@ -530,7 +530,7 @@ export class InfaktClient {
     try {
       return await fetch(url, { ...init, signal: controller.signal });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = describeError(error);
       throw new InfaktApiError({
         httpStatus: 0,
         message: `inFakt request failed: ${reason}`,

@@ -1,6 +1,7 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
 import type { Logger } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { describeError } from "../lib/infakt/errors";
 import { runInvoicing } from "../lib/invoicing/run";
 import { orderIdForPayment } from "../lib/invoicing/trigger";
 import type { GraphQuery } from "../lib/invoicing/trigger";
@@ -142,9 +143,7 @@ async function issueNow(
     }
   } catch (error) {
     logger.warn(
-      `[medusa-infakt] could not invoice order ${orderId} immediately: ${
-        error instanceof Error ? error.message : String(error)
-      }. The order stays queued and the invoicing worker will retry it.`,
+      `[medusa-infakt] could not invoice order ${orderId} immediately: ${describeError(error)}. The order stays queued and the invoicing worker will retry it.`,
     );
   }
 }
