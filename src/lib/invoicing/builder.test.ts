@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInfaktInvoicePayload } from "./builder";
+import { buildInfaktInvoicePayload, companyNameDefect } from "./builder";
 import { EXPORT_SERVICES_NOTE, REVERSE_CHARGE_NOTE } from "./regime";
 import type {
   InvoiceBuilderConfig,
@@ -453,6 +453,88 @@ describe("buildInfaktInvoicePayload: rejection reasons never leak the NIP", () =
   });
 });
 
+describe("the last gate on a company name", () => {
+  /**
+   * Two invoices went out to real customers reading `NZOZ "Familia" Monika
+   * Kwasniak ( )` - numbered, filed to KSeF, and correctable only by a corrective
+   * invoice. The cause was an upstream import folding the tax id into the company
+   * name; this gate is what makes the same class of residue a `needs_review` row
+   * instead of a document.
+   */
+  const withName = (companyName: string) =>
+    buildInfaktInvoicePayload(order(), { ...company, companyName }, config);
+
+  it("refuses the exact shape that reached a customer", () => {
+    const result = withName('NZOZ "Familia" Monika Kwasniak ( )');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("empty bracket pair");
+    }
+  });
+
+  it("refuses an unbalanced bracket", () => {
+    expect(withName("Poradnia Lekarska (").ok).toBe(false);
+    expect(withName("Poradnia Lekarska )").ok).toBe(false);
+  });
+
+  it("refuses a dangling separator", () => {
+    for (const name of ["ACME Sp. z o.o. -", "ACME Sp. z o.o. ,", "- ACME Sp. z o.o."]) {
+      expect(withName(name).ok).toBe(false);
+    }
+  });
+
+  it("refuses a name that is nothing but punctuation", () => {
+    const result = withName("- .");
+    expect(result.ok).toBe(false);
+  });
+
+  it("refuses a name that still carries the tax id, in either spelling", () => {
+    for (const name of ["ACME Sp. z o.o. 5261040828", "ACME Sp. z o.o. 526-104-08-28"]) {
+      const result = withName(name);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toContain("still contains the tax id");
+      }
+    }
+  });
+
+  it("passes the names this must never hold up", () => {
+    for (const name of [
+      "ACME Sp. z o.o.",
+      'Poradnia Lekarska "Medicus" Sp. z o.o.',
+      'NZOZ "Familia" Monika Kwasniak',
+      "Nowak-Kowalski i Wspolnicy S.C.",
+      "Firma (Oddzial Zachodni) Sp. z o.o.",
+      "Zaklad Nr 4",
+    ]) {
+      const result = withName(name);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.payload.client_company_name).toBe(name);
+      }
+    }
+  });
+
+  it("never names the buyer or the tax id in the reason", () => {
+    const secrets = ["Familia", "Kwasniak", "ACME", "5261040828", "526-104-08-28"];
+    for (const name of ['NZOZ "Familia" Monika Kwasniak ( )', "ACME Sp. z o.o. 526-104-08-28"]) {
+      const result = withName(name);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        for (const secret of secrets) {
+          expect(result.reason).not.toContain(secret);
+        }
+      }
+    }
+  });
+
+  it("is a pure predicate, callable without a whole order", () => {
+    expect(companyNameDefect("ACME Sp. z o.o.")).toBeNull();
+    expect(companyNameDefect("ACME ( )")).toContain("empty bracket pair");
+    expect(companyNameDefect("ACME", "5261040828")).toBeNull();
+  });
+});
+
 describe("cross-border regimes", () => {
   const eur: InvoiceBuilderConfig = { currency: "EUR", taxSymbol: "23" };
   const eurOrder = () => order({ currency: "EUR" });
@@ -482,6 +564,20 @@ describe("cross-border regimes", () => {
     taxSymbol: "np",
     vatUeReportable: false,
   } as const;
+
+  it("holds a cross-border invoice whose company name is malformed", () => {
+    // The same last gate as the domestic path. A reverse-charge document is no less
+    // a legal one, and the same upstream un-concatenation feeds it.
+    const result = buildInfaktInvoicePayload(
+      eurOrder(),
+      { ...deCompany, companyName: "ACME GmbH ( )" },
+      { ...eur, regime: reverseCharge },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("empty bracket pair");
+    }
+  });
 
   it("puts np on every line of a reverse-charge invoice, never 0", () => {
     const result = unwrap(

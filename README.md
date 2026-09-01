@@ -754,6 +754,33 @@ A NIP that normalizes to ten digits but fails its checksum is still used. inFakt
 ultimately KSeF, is the authority on whether a number is acceptable; refusing here would
 park a legally required document over a check this plugin is not the arbiter of.
 
+### Source 3 is a compatibility path, not the contract
+
+`order.metadata.nip` is where a tax id belongs. Reading one out of
+`billing_address.company` exists because some upstream systems concatenated the two
+into the name, and this plugin then has to un-concatenate them - which is inherently
+approximate. It got it wrong: two invoices went out reading `Firma ( )`, because the
+strip removed the digits and the word `NIP` but not the brackets they sat in. They were
+already numbered and already filed to KSeF, so correcting them needs a formal corrective
+invoice.
+
+`@zanreal/medusa-allegro` writes `order.metadata.nip` now and leaves the company name
+alone. Source 3 stays for the orders that predate that, and for storefronts that still
+do it - but if you control the writer, write the metadata key.
+
+### The last gate on a company name
+
+Whatever the cleaning produced, a company name that still looks mangled is **never
+sent**. The invoice goes to `needs_review` instead. Five shapes are refused, all of them
+residue rather than anything a legal name has: an empty bracket pair, an unbalanced
+bracket, a leading or trailing dangling separator, a name with no letters or digits at
+all, and a name that still contains the tax id. A trailing full stop is explicitly fine -
+`Sp. z o.o.` ends in one.
+
+The trade is deliberate and one-directional: a delayed invoice is an operator task on
+the `needs_review` queue, a wrong one is a legal document that can only be undone with
+another legal document.
+
 ## KSeF
 
 ### Modes
@@ -814,6 +841,11 @@ and usually names the fix, alongside the same operator actions listed below.
 | _no intra-EU B2C threshold is configured for X_                   | An EU consumer sale in a currency with no configured limit.                    | Add the currency to `oss.thresholds`, or stop selling to EU consumers in it.                                                      |
 | _invoice number N is already recorded against order X_            | Two orders hold the same invoice number, across inFakt document families.      | **Do not retry blindly.** Downstream license keys are keyed on this number; resolve which invoice belongs to which order first.   |
 | _buyer has a NIP but no company name_                             | A B2B invoice needs both.                                                      | Add the company name to the billing address, then **Retry**.                                                                      |
+| _buyer company name contains an empty bracket pair_               | A tax id was concatenated into the name upstream and stripping it left `( )`.  | Put the clean company name on the billing address and the tax id on `metadata.nip`, then **Retry**.                               |
+| _buyer company name has an unbalanced bracket_                    | The same residue with one bracket eaten.                                       | Same fix.                                                                                                                          |
+| _buyer company name starts or ends with a dangling separator_     | A removal left a trailing comma, colon, slash or dash.                         | Same fix.                                                                                                                          |
+| _buyer company name contains no letters or digits_                | Nothing but punctuation survived the cleaning.                                 | Same fix.                                                                                                                          |
+| _buyer company name still contains the tax id after cleaning_     | The name would print the tax number twice, once in the wrong place.            | Same fix.                                                                                                                          |
 | _inFakt rejected the invoice: ..._                                | inFakt's validation refused the payload; its own message follows.              | Fix what it names, then **Retry**. Nothing was issued.                                                                            |
 | _KSeF rejected the invoice: ..._                                  | The invoice exists in inFakt but KSeF refused it. The description is KSeF's.   | Fix it in inFakt, then **Retry** - the row resumes at the KSeF step and does not re-create the invoice.                           |
 | _is the KSeF integration active on the inFakt account?_           | The submit was refused and no KSeF status could be read.                       | Fix the integration in inFakt, **Re-check KSeF** on Settings -> inFakt, then **Retry**.                                           |

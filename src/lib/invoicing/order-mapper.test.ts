@@ -389,6 +389,103 @@ describe("mapper plus builder, end to end", () => {
   });
 });
 
+describe("the three shapes an Allegro order reaches invoicing in", () => {
+  /**
+   * The Allegro import used to write `${companyName} (${taxId})` into
+   * `billing_address.company`, and `cleanCompanyName` had to take it back out. It
+   * writes the tax id to `order.metadata.nip` now and leaves the name alone, so
+   * both shapes exist in the database at once and both have to invoice correctly.
+   */
+  const config = { currency: "PLN", taxSymbol: "23" };
+  const build = (order: MedusaOrderLike) =>
+    buildInfaktInvoicePayload(
+      toInvoiceOrderInput(order, "PLN"),
+      toInvoiceBuyerInput(order, defaultNipExtractor),
+      config,
+    );
+
+  const address = { address_1: "Rynek 5", city: "Krakow", postal_code: "31-042" };
+  const NAME = 'NZOZ "Familia" Monika Kwasniak';
+
+  it("a natural person: no company, no tax id, a consumer invoice", () => {
+    const result = build(
+      medusaOrder({
+        billing_address: { ...address, first_name: "Monika", last_name: "Kwasniak" },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isCompany).toBe(false);
+      expect(result.nip).toBeUndefined();
+      expect(result.payload.client_company_name).toBeUndefined();
+      expect(result.payload.client_business_activity_kind).toBe("private_person");
+    }
+  });
+
+  it("the new format: a clean company name plus `metadata.nip`", () => {
+    const result = build(
+      medusaOrder({
+        billing_address: { ...address, company: NAME },
+        metadata: { allegro_checkout_form_id: "form-1", nip: VALID_NIP },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isCompany).toBe(true);
+      expect(result.nip).toBe(VALID_NIP);
+      expect(result.payload.client_company_name).toBe(NAME);
+      expect(result.payload.client_tax_code).toBe(VALID_NIP);
+    }
+  });
+
+  it("the old format: the NIP baked into the name, no metadata at all", () => {
+    // Exactly what orders 50 and 51 carry in production. The invoice must come out
+    // identical to the new-format one above.
+    const result = build(
+      medusaOrder({
+        billing_address: { ...address, company: `${NAME} (${VALID_NIP})` },
+        metadata: { allegro_checkout_form_id: "form-1" },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isCompany).toBe(true);
+      expect(result.nip).toBe(VALID_NIP);
+      expect(result.payload.client_company_name).toBe(NAME);
+      expect(result.payload.client_tax_code).toBe(VALID_NIP);
+    }
+  });
+
+  it("the old format spelled with the word NIP and separators", () => {
+    const result = build(
+      medusaOrder({
+        billing_address: { ...address, company: `${NAME} (NIP 526-104-08-28)` },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.payload.client_company_name).toBe(NAME);
+    }
+  });
+
+  it("a name the cleaning could not rescue is parked, never invoiced", () => {
+    // `cleanCompanyName` falls back to the raw value rather than returning blank,
+    // so a name that was ONLY the tax id survives cleaning intact. The builder's
+    // last gate is what stops it reaching a customer.
+    const result = build(
+      medusaOrder({
+        billing_address: { ...address, company: VALID_NIP },
+        metadata: { nip: VALID_NIP },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("still contains the tax id");
+      expect(result.reason).not.toContain(VALID_NIP);
+    }
+  });
+});
+
 describe("BigNumber quantity off query.graph", () => {
   // The shape `query.graph` returns for numeric order columns: a BigNumber
   // instance, not a number. Reconstructed to pin the contract, not a Medusa
