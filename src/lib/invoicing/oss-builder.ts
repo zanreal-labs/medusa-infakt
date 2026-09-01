@@ -33,7 +33,7 @@
 
 import type { InfaktOssInvoicePayload, InfaktOssServicePayload } from "../infakt/types";
 import type { InvoiceBuyerInput, InvoiceOrderInput } from "./builder";
-import { lineGrossMinor, MAX_SERVICE_NAME, shippingLineName, UNIT_PIECES } from "./builder";
+import { lineGrossMinor, shippingLineName, truncateServiceName, UNIT_PIECES } from "./builder";
 import { toMinorUnits, warsawDate } from "./money";
 
 export interface OssBuilderConfig {
@@ -82,7 +82,7 @@ export function buildOssInvoicePayload(
     }
     services.push({
       gross_price: line,
-      name: item.name.slice(0, MAX_SERVICE_NAME),
+      name: truncateServiceName(item.name),
       quantity: item.quantity,
       tax_rate: config.rate,
       unit: UNIT_PIECES,

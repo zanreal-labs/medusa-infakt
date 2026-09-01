@@ -11,7 +11,7 @@ import type { InfaktClient } from "../infakt/client";
 import { classifyOrderSupply } from "./classification";
 import { isEuMember } from "./eu";
 import type { MedusaOrderLike } from "./order-mapper";
-import { toClassifiableLines } from "./order-mapper";
+import { businessNameSignal, toClassifiableLines } from "./order-mapper";
 import type { VatRegime, ViesFallback } from "./regime";
 import { decideVatRegime } from "./regime";
 import type { EuB2cSale } from "./threshold";
@@ -119,7 +119,9 @@ export async function resolveOrderRegime(
 
   return decideVatRegime({
     billingCountry,
-    companyName: address?.company ?? null,
+    // Cleaned and residue-checked, so the regime and the payload agree about
+    // whether this buyer has a company name at all. See `businessNameSignal`.
+    companyName: businessNameSignal(address?.company, buyerTaxId ?? undefined),
     domesticTaxSymbol: options.domesticTaxSymbol,
     ossEnabled: options.ossEnabled,
     ossRateFor: () => rate,

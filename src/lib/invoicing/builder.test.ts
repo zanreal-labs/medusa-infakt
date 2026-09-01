@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildInfaktInvoicePayload, companyNameDefect } from "./builder";
+import {
+  buildInfaktInvoicePayload,
+  companyNameDefect,
+  MAX_SERVICE_NAME,
+  shippingLineName,
+  textShapeDefect,
+  truncateServiceName,
+} from "./builder";
 import { EXPORT_SERVICES_NOTE, REVERSE_CHARGE_NOTE } from "./regime";
 import type {
   InvoiceBuilderConfig,
@@ -708,5 +715,91 @@ describe("the domestic path is unchanged", () => {
     const result = unwrap(buildInfaktInvoicePayload(order(), company, config));
     expect(result.nip).toBe("5261040828");
     expect(result.payload.client_tax_code).toBe("5261040828");
+  });
+});
+
+describe("residue never reaches a service line", () => {
+  /**
+   * The company name was never the only free text on an invoice. A service line
+   * name is assembled by concatenation too, and the same missing value leaves the
+   * same stranded separator behind - `Dostawa - ` instead of `Firma ( )`. These
+   * pin the gate that `companyNameDefect` always had and the line names did not.
+   */
+  const lineNames = (o: InvoiceOrderInput): string[] => {
+    const result = buildInfaktInvoicePayload(o, consumer, config);
+    if (!result.ok) {
+      throw new Error(`expected a payload, got: ${result.reason}`);
+    }
+    return (result.payload.services ?? []).map((service) => service.name);
+  };
+
+  it("drops the qualifier when the shipping method name is only a separator", () => {
+    for (const name of [" ", "-", " - ", "()", ","]) {
+      expect(shippingLineName(name)).toBe("Dostawa");
+    }
+  });
+
+  it("keeps a real carrier name, brackets and all", () => {
+    expect(shippingLineName("Paczkomat InPost")).toBe("Dostawa - Paczkomat InPost");
+    expect(shippingLineName("Kurier (DPD)")).toBe("Dostawa - Kurier (DPD)");
+  });
+
+  it("never puts a dangling separator on a shipping line of a real invoice", () => {
+    const names = lineNames(order({ shipping: [{ grossTotal: 9.99, name: " - " }] }));
+    expect(names).toContain("Dostawa");
+    for (const name of names) {
+      expect(textShapeDefect(name)).toBeNull();
+    }
+  });
+
+  it("truncates a long name on a character, never inside one", () => {
+    // A surrogate pair straddling the limit used to be cut in half, emitting a
+    // lone surrogate - a replacement glyph on the customer's PDF.
+    const long = `${"a".repeat(MAX_SERVICE_NAME - 1)}😀 tail`;
+    const cut = truncateServiceName(long);
+    expect(cut.length).toBeLessThanOrEqual(MAX_SERVICE_NAME);
+    expect([...cut].every((character) => character.codePointAt(0) !== undefined)).toBe(true);
+    expect(/[\uD800-\uDFFF]/u.test(cut)).toBe(false);
+  });
+
+  it("leaves no dangling separator where it cut", () => {
+    expect(truncateServiceName(`${"a".repeat(MAX_SERVICE_NAME - 2)} - tail`)).toBe(
+      "a".repeat(MAX_SERVICE_NAME - 2),
+    );
+  });
+
+  it("leaves a name that already fits exactly as it is", () => {
+    expect(truncateServiceName("Program antywirusowy")).toBe("Program antywirusowy");
+  });
+});
+
+describe("textShapeDefect", () => {
+  it("names the shapes no legal text has", () => {
+    expect(textShapeDefect("ACME ( )")).toBe("empty_brackets");
+    expect(textShapeDefect("ACME (")).toBe("unbalanced_bracket");
+    expect(textShapeDefect("ACME -")).toBe("dangling_separator");
+    expect(textShapeDefect("...")).toBe("no_alphanumerics");
+  });
+
+  it("passes text a document may legitimately carry", () => {
+    for (const value of [
+      "ACME Sp. z o.o.",
+      "Firma (Oddzial Zachodni) Sp. z o.o.",
+      "Dostawa - Paczkomat InPost",
+      "Program antywirusowy - licencja roczna",
+    ]) {
+      expect(textShapeDefect(value)).toBeNull();
+    }
+  });
+
+  it("still produces the company-name wording it was extracted from", () => {
+    expect(companyNameDefect("ACME ( )")).toBe(
+      "buyer company name contains an empty bracket pair",
+    );
+    expect(companyNameDefect("ACME (")).toBe("buyer company name has an unbalanced bracket");
+    expect(companyNameDefect("ACME -")).toBe(
+      "buyer company name starts or ends with a dangling separator",
+    );
+    expect(companyNameDefect("...")).toBe("buyer company name contains no letters or digits");
   });
 });

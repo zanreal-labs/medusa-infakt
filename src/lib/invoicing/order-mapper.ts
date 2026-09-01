@@ -1,4 +1,5 @@
 import type { InvoiceBuyerInput, InvoiceOrderInput } from "./builder";
+import { companyNameDefect } from "./builder";
 import type { ClassifiableLine } from "./classification";
 import { bigNumberToMinorUnits, bigNumberToQuantity } from "./money";
 import type { NipExtractorOrder } from "./nip";
@@ -109,12 +110,50 @@ export function lineItemName(item: MedusaLineItemLike): string {
   const title = item.title?.trim();
   if (product && variant && variant !== product) {
     if (variant.startsWith(product) && /^[^\p{L}\p{N}]/u.test(variant.slice(product.length))) {
-      const suffix = variant.slice(product.length).replace(/^[\s-]+/u, "").trim();
+      // Every leading non-alphanumeric is dropped, not just whitespace and
+      // hyphens. Stripping only `[\s-]` left the rest of the join behind, so a
+      // variant titled "Product / 1 rok" came out as "Product - / 1 rok" - a
+      // separator with nothing between it and the next one, printed on an
+      // invoice. See `builder.ts`'s `textShapeDefect` for the shape.
+      const suffix = variant.slice(product.length).replace(/^[^\p{L}\p{N}]+/u, "").trim();
       return suffix ? `${product} - ${suffix}` : product;
     }
     return `${product} - ${variant}`;
   }
   return product || title || variant || "Pozycja";
+}
+
+/**
+ * The company name, but only when it is evidence that the buyer is a business.
+ *
+ * `decideVatRegime` treats a non-empty company name as one of the two signals that
+ * a non-EU buyer is a business rather than a consumer, and a business supply is
+ * invoiced `np` - outside Polish VAT - with a statutory annotation on the document.
+ * That decision was being made on the RAW `billing_address.company`, while the
+ * builder printed the CLEANED one. So the same order could be classified as a
+ * company on the strength of text the builder had already stripped away: an order
+ * whose company field held nothing but `(5261040828)` was a business to the regime
+ * and had no company name at all to the payload.
+ *
+ * Cleaning it first makes the two halves agree, and refusing residue makes the
+ * disagreement fail in the safe direction: a non-EU buyer with no usable company
+ * name and no tax id is `blocked`, which is a `needs_review` row an operator looks
+ * at, rather than an invoice asserting a place of supply outside Poland.
+ */
+export function businessNameSignal(
+  companyName?: string | null,
+  taxId?: string,
+): string | null {
+  const cleaned = cleanCompanyName(companyName, taxId);
+  if (!cleaned) {
+    return null;
+  }
+  // The full builder gate, tax-id branch included, and that branch is load
+  // bearing here: `cleanCompanyName` falls back to the RAW value when cleaning
+  // empties it, so a company field holding nothing but `(5261040828)` survives
+  // as itself - balanced brackets, digits present, no dangling separator. Only
+  // "the name still contains the tax id" catches that one.
+  return companyNameDefect(cleaned, taxId) ? null : cleaned;
 }
 
 /** Street line: `address_1`, with `address_2` appended when present. */
