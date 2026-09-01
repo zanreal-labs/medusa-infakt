@@ -289,6 +289,72 @@ export function lineGrossMinor(item: InvoiceItemInput): number | null {
   return unit * item.quantity;
 }
 
+/**
+ * A company name that must not be printed on an invoice, or `null` when it is fine.
+ *
+ * ## Why a last gate exists at all
+ *
+ * `cleanCompanyName` un-concatenates a tax id that an upstream system folded into
+ * the company field. Un-concatenating a human-readable string is inherently
+ * approximate, and when it got it wrong two invoices went out to real customers
+ * reading `NZOZ "Familia" Monika Kwasniak ( )` - already numbered, already filed to
+ * KSeF, and correctable only by a formal corrective invoice. The cause has been
+ * fixed at the source (the Allegro import carries the tax id on `order.metadata.nip`
+ * now, and never in the name), and `cleanCompanyName` still repairs the orders that
+ * predate that. This is the belt to those braces: whatever the cleaning produced, a
+ * name that still LOOKS mangled is not sent.
+ *
+ * A defect here parks the invoice in `needs_review` rather than issuing it. That is
+ * the deliberate trade: a delayed invoice is an operator task, a wrong one is a legal
+ * document that has to be corrected with another legal document.
+ *
+ * ## What counts as a defect
+ *
+ * Only shapes that no legal name has, so a correct invoice is never held up:
+ *
+ *  - an empty bracket pair - the exact residue of a stripped tax id;
+ *  - an unbalanced bracket, which is the same residue with one side eaten;
+ *  - a leading or trailing separator left dangling by a removal. `.` is NOT one of
+ *    them: "Sp. z o.o." legitimately ends in a full stop;
+ *  - nothing left but punctuation;
+ *  - the tax id still sitting inside the name, which would print it twice.
+ *
+ * ## Never the value
+ *
+ * The reason names the defect, never the name and never the tax id. It is persisted
+ * to `InfaktInvoice.last_error` and rendered in the admin UI - see the PII rule at
+ * the top of this file. There is a test asserting neither appears.
+ */
+export function companyNameDefect(companyName: string, nip?: string): string | null {
+  if (/[([{]\s*[)\]}]/u.test(companyName)) {
+    return "buyer company name contains an empty bracket pair";
+  }
+
+  const opened = (companyName.match(/[([{]/gu) ?? []).length;
+  const closed = (companyName.match(/[)\]}]/gu) ?? []).length;
+  if (opened !== closed) {
+    return "buyer company name has an unbalanced bracket";
+  }
+
+  // A full stop is excluded on purpose: "Sp. z o.o." is how Polish limited
+  // companies are written and it is not a dangling separator.
+  if (/^[\s,;:|/\\\-\u2013\u2014]|[\s,;:|/\\\-\u2013\u2014]$/u.test(companyName)) {
+    return "buyer company name starts or ends with a dangling separator";
+  }
+
+  if (!/[\p{L}\p{N}]/u.test(companyName)) {
+    return "buyer company name contains no letters or digits";
+  }
+
+  // Compared with separators collapsed, so "526-104-08-28" is caught as well as the
+  // bare digits. `nip` is already normalized to ten digits by the caller.
+  if (nip && companyName.replaceAll(/(?<=\d)[\s.-]+(?=\d)/gu, "").includes(nip)) {
+    return "buyer company name still contains the tax id after cleaning";
+  }
+
+  return null;
+}
+
 type ClientFieldsResult =
   | { fields: Partial<InfaktInvoicePayload>; isCompany: boolean; nip?: string }
   | { reason: string };
@@ -334,6 +400,12 @@ function buildClientFields(
     }
     const taxCode =
       regime.kind === "reverse_charge" ? regime.vatId : buyer.taxId?.trim().toUpperCase();
+    // The same last gate as the domestic branch below. A cross-border invoice is no
+    // less a legal document, and the same upstream un-concatenation feeds it.
+    const crossBorderDefect = companyNameDefect(companyName, taxCode);
+    if (crossBorderDefect) {
+      return { reason: crossBorderDefect };
+    }
     // An export of services may legitimately have no tax code at all - the one
     // such invoice on this account does not - so it is omitted rather than
     // demanded. A reverse charge always has one, guaranteed by the regime.
@@ -367,6 +439,11 @@ function buildClientFields(
     const companyName = buyer.companyName?.trim();
     if (!companyName) {
       return { reason: "buyer has a NIP but no company name" };
+    }
+    // The last gate before a name becomes a legal document. See `companyNameDefect`.
+    const defect = companyNameDefect(companyName, nip);
+    if (defect) {
+      return { reason: defect };
     }
     return {
       fields: {
