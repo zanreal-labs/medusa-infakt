@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildInfaktInvoicePayload } from "./builder";
 import { defaultNipExtractor } from "./nip";
 import {
+  businessNameSignal,
   cleanCompanyName,
   lineItemName,
   streetLine,
@@ -518,5 +519,77 @@ describe("BigNumber quantity off query.graph", () => {
     const mapped = toInvoiceOrderInput(order, "PLN");
     expect(mapped.items[0]?.quantity).toBe(1);
     expect(mapped.items[0]?.grossTotal).toBe(206);
+  });
+});
+
+describe("lineItemName leaves no separator stranded", () => {
+  /**
+   * The invoice line is the legal statement of what was sold, and this function is
+   * both halves of the bug class in one place: it GLUES a product title to a variant
+   * title with " - ", and it UN-GLUES the shared prefix back out again. Stripping
+   * only `[\s-]` from the remainder left the rest of the catalogue's own separator
+   * behind, so "Antivirus Plus / 1 rok" printed as "Antivirus Plus - / 1 rok".
+   */
+  const name = (product: string, variant: string) =>
+    lineItemName({ product_title: product, quantity: 1, variant_title: variant });
+
+  it("strips a separator the catalogue used, not just whitespace and hyphens", () => {
+    expect(name("Antivirus Plus", "Antivirus Plus / 1 rok")).toBe("Antivirus Plus - 1 rok");
+    expect(name("Antivirus Plus", "Antivirus Plus, 1 rok")).toBe("Antivirus Plus - 1 rok");
+    expect(name("Antivirus Plus", "Antivirus Plus | 1 rok")).toBe("Antivirus Plus - 1 rok");
+  });
+
+  it("keeps producing the names this catalogue already invoices", () => {
+    expect(name("Bitdefender Antivirus Plus", "1 rok / 10")).toBe(
+      "Bitdefender Antivirus Plus - 1 rok / 10",
+    );
+    expect(
+      name(
+        "Bitdefender Pro Security for Windows - Limited Edition",
+        "Bitdefender Pro Security for Windows - Limited Edition - 3 lata / 5 urzadzen",
+      ),
+    ).toBe("Bitdefender Pro Security for Windows - Limited Edition - 3 lata / 5 urzadzen");
+  });
+
+  it("falls back to the product alone rather than printing a bare separator", () => {
+    expect(name("Antivirus Plus", "Antivirus Plus -")).toBe("Antivirus Plus");
+    expect(name("Antivirus Plus", "Antivirus Plus ()")).toBe("Antivirus Plus");
+  });
+});
+
+describe("businessNameSignal", () => {
+  /**
+   * The VAT regime read the RAW company field while the builder printed the CLEANED
+   * one, so an order could be a business to the regime and have no company name at
+   * all to the payload. A non-EU business is invoiced `np` - outside Polish VAT -
+   * with a statutory annotation, so the two halves disagreeing is a legal problem.
+   */
+  it("cleans the tax id out before treating the name as evidence", () => {
+    expect(businessNameSignal(`ACME Sp. z o.o. (${VALID_NIP})`, VALID_NIP)).toBe(
+      "ACME Sp. z o.o.",
+    );
+  });
+
+  it("refuses residue, so the regime sees no company rather than a mangled one", () => {
+    expect(businessNameSignal(`(${VALID_NIP})`, VALID_NIP)).toBeNull();
+    expect(businessNameSignal("( )")).toBeNull();
+    expect(businessNameSignal(" - ")).toBeNull();
+    expect(businessNameSignal("")).toBeNull();
+    expect(businessNameSignal(null)).toBeNull();
+  });
+
+  it("passes a real company name through untouched", () => {
+    for (const value of [
+      "ACME Sp. z o.o.",
+      'NZOZ "Familia" Monika Kwasniak',
+      "Firma (Oddzial Zachodni) Sp. z o.o.",
+    ]) {
+      expect(businessNameSignal(value)).toBe(value);
+    }
+  });
+
+  it("agrees with what the builder would print", () => {
+    const company = `ACME Sp. z o.o. (${VALID_NIP})`;
+    expect(businessNameSignal(company, VALID_NIP)).toBe(cleanCompanyName(company, VALID_NIP));
   });
 });

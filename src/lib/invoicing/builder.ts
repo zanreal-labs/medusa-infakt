@@ -185,7 +185,7 @@ export function buildInfaktInvoicePayload(
     }
     services.push({
       gross_price: line,
-      name: item.name.slice(0, MAX_SERVICE_NAME),
+      name: truncateServiceName(item.name),
       quantity: item.quantity,
       tax_symbol: taxSymbol,
       unit: UNIT_PIECES,
@@ -262,9 +262,21 @@ export function buildInfaktInvoicePayload(
   };
 }
 
-/** The "Dostawa" label for a shipping line. Shared with the OSS builder. */
+/**
+ * The "Dostawa" label for a shipping line. Shared with the OSS builder.
+ *
+ * The qualifier is only appended when there is something to qualify with. A
+ * shipping method named `" "` or `"-"` is truthy, and gluing it behind the
+ * separator printed `Dostawa - ` on an invoice line - the same stranded-separator
+ * shape as `Name ( )`, one field over. A method with no usable name is simply
+ * "Dostawa", which is what the line means anyway.
+ */
 export function shippingLineName(name: string | null | undefined): string {
-  return name ? `Dostawa - ${name}`.slice(0, MAX_SERVICE_NAME) : "Dostawa";
+  const label = name?.trim();
+  if (!label || textShapeDefect(label)) {
+    return "Dostawa";
+  }
+  return truncateServiceName(`Dostawa - ${label}`);
 }
 
 /**
@@ -326,24 +338,9 @@ export function lineGrossMinor(item: InvoiceItemInput): number | null {
  * the top of this file. There is a test asserting neither appears.
  */
 export function companyNameDefect(companyName: string, nip?: string): string | null {
-  if (/[([{]\s*[)\]}]/u.test(companyName)) {
-    return "buyer company name contains an empty bracket pair";
-  }
-
-  const opened = (companyName.match(/[([{]/gu) ?? []).length;
-  const closed = (companyName.match(/[)\]}]/gu) ?? []).length;
-  if (opened !== closed) {
-    return "buyer company name has an unbalanced bracket";
-  }
-
-  // A full stop is excluded on purpose: "Sp. z o.o." is how Polish limited
-  // companies are written and it is not a dangling separator.
-  if (/^[\s,;:|/\\\-\u2013\u2014]|[\s,;:|/\\\-\u2013\u2014]$/u.test(companyName)) {
-    return "buyer company name starts or ends with a dangling separator";
-  }
-
-  if (!/[\p{L}\p{N}]/u.test(companyName)) {
-    return "buyer company name contains no letters or digits";
+  const shape = textShapeDefect(companyName);
+  if (shape) {
+    return COMPANY_NAME_DEFECT_REASON[shape];
   }
 
   // Compared with separators collapsed, so "526-104-08-28" is caught as well as the
@@ -353,6 +350,88 @@ export function companyNameDefect(companyName: string, nip?: string): string | n
   }
 
   return null;
+}
+
+/**
+ * The shape of residue, independent of which field it turned up in.
+ *
+ * Extracted from `companyNameDefect` because the company name was never the only
+ * free text on an invoice. A service line name is assembled by concatenation too
+ * (`lineItemName` glues a product title to a variant title, `shippingLineName`
+ * glues a carrier name behind "Dostawa - "), and the VAT regime reads the company
+ * field as evidence that the buyer is a business. All of them can be handed the
+ * same leftovers, and all of them print onto - or decide - a legal document.
+ *
+ * Deliberately shape-only: it says nothing about tax ids, because only a company
+ * name has one to carry. Callers that need that check compose it themselves, as
+ * `companyNameDefect` does.
+ */
+export type TextShapeDefect =
+  | "empty_brackets"
+  | "unbalanced_bracket"
+  | "dangling_separator"
+  | "no_alphanumerics";
+
+/**
+ * Characters that are separators rather than part of a name.
+ *
+ * A full stop is excluded on purpose: "Sp. z o.o." is how Polish limited companies
+ * are written and it is not a dangling separator.
+ */
+const DANGLING_SEPARATOR = /^[\s,;:|/\\\-\u2013\u2014]|[\s,;:|/\\\-\u2013\u2014]$/u;
+
+/** The shape defect in a piece of free text, or `null` when it looks intact. */
+export function textShapeDefect(value: string): TextShapeDefect | null {
+  if (/[([{]\s*[)\]}]/u.test(value)) {
+    return "empty_brackets";
+  }
+
+  const opened = (value.match(/[([{]/gu) ?? []).length;
+  const closed = (value.match(/[)\]}]/gu) ?? []).length;
+  if (opened !== closed) {
+    return "unbalanced_bracket";
+  }
+
+  if (DANGLING_SEPARATOR.test(value)) {
+    return "dangling_separator";
+  }
+
+  if (!/[\p{L}\p{N}]/u.test(value)) {
+    return "no_alphanumerics";
+  }
+
+  return null;
+}
+
+/** The wording each shape defect gets when it is a buyer company name. */
+const COMPANY_NAME_DEFECT_REASON: Record<TextShapeDefect, string> = {
+  dangling_separator: "buyer company name starts or ends with a dangling separator",
+  empty_brackets: "buyer company name contains an empty bracket pair",
+  no_alphanumerics: "buyer company name contains no letters or digits",
+  unbalanced_bracket: "buyer company name has an unbalanced bracket",
+};
+
+/**
+ * Cut a service name to inFakt's limit without inventing a character.
+ *
+ * `String.prototype.slice` counts UTF-16 code units, so cutting a marketplace
+ * title at 255 can land between the two halves of a surrogate pair and emit a lone
+ * surrogate - a replacement glyph on the customer's PDF, from the same family of
+ * defects as `( )`. This walks whole code points and stops before the limit, then
+ * trims whatever separator the cut left dangling.
+ */
+export function truncateServiceName(name: string): string {
+  if (name.length <= MAX_SERVICE_NAME) {
+    return name;
+  }
+  let out = "";
+  for (const character of name) {
+    if (out.length + character.length > MAX_SERVICE_NAME) {
+      break;
+    }
+    out += character;
+  }
+  return out.replace(/[\s,;:|/\\\-\u2013\u2014]+$/u, "");
 }
 
 type ClientFieldsResult =

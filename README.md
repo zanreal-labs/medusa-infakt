@@ -781,6 +781,51 @@ The trade is deliberate and one-directional: a delayed invoice is an operator ta
 the `needs_review` queue, a wrong one is a legal document that can only be undone with
 another legal document.
 
+### The same gate, everywhere free text reaches the document
+
+The company name was never the only assembled string on an invoice, and the gate above
+was only ever applied to it. The shape checks now live in `textShapeDefect`, and three
+other places on the document use them.
+
+**The VAT regime reads the same company field, and used to read it raw.**
+`decideVatRegime` treats a non-empty company name as one of the two signals that a
+non-EU buyer is a business rather than a consumer, and a business supply is invoiced
+`np` - outside Polish VAT - with a statutory annotation on the face of the document.
+That decision was made on `billing_address.company` verbatim while the payload printed
+the cleaned value, so one order could be a company to the regime and have no company
+name at all to the builder. It now goes through `businessNameSignal`, which cleans the
+field and then puts it through the full `companyNameDefect` gate. A non-EU buyer whose
+company field holds only residue is `blocked` - a `needs_review` row - rather than an
+invoice asserting a place of supply outside Poland.
+
+Note which branch of the gate does the work there: `cleanCompanyName` deliberately falls
+back to the raw value when cleaning empties it, so a field holding nothing but
+`(5261040828)` survives as itself - the brackets balance, digits are present, nothing
+dangles. Only "the name still contains the tax id" catches it.
+
+**A shipping line is a concatenation too.** `shippingLineName` glued the carrier name
+behind `Dostawa - ` on nothing but truthiness, so a method named `" "` or `"-"` printed
+`Dostawa - ` on an invoice line: the same stranded separator as `Firma ( )`, one field
+over. A method with no usable name is now simply `Dostawa`, which is what the line means.
+
+**A line item name is glued and then un-glued.** `lineItemName` joins the product title
+to the variant title with `" - "`, and where the variant title already begins with the
+product title it strips the shared prefix back off. That strip removed only whitespace
+and hyphens, so a catalogue that separates its own variants with something else -
+`Antivirus Plus / 1 rok` - came out as `Antivirus Plus - / 1 rok`. It now drops every
+leading non-alphanumeric, and falls back to the product name alone rather than printing
+a bare separator.
+
+**Truncation cut inside a character.** Service names are capped at 255 for inFakt, and
+`String.prototype.slice` counts UTF-16 code units - a marketplace title whose 255th
+boundary landed inside a surrogate pair emitted a lone surrogate, which is a replacement
+glyph on the customer's PDF. `truncateServiceName` walks whole code points and trims
+whatever separator the cut leaves behind.
+
+None of these park an invoice; they are shape fixes at the point of assembly rather than
+gates. Only the regime's company-name signal can send a row to `needs_review`, and only
+in the direction of asking a human rather than issuing a document.
+
 ## KSeF
 
 ### Modes
