@@ -225,6 +225,11 @@ export function cleanCompanyName(
     .replaceAll(/\bNIP\b/giu, " ")
     .replaceAll(/(?<=\d)[\s.-]+(?=\d)/gu, "")
     .replaceAll(new RegExp(`(?<!\\d)${nip}(?!\\d)`, "gu"), " ")
+    // Taking the NIP out of "Firma (NIP 526-104-08-28)" leaves the brackets
+    // behind, and an invoice reading "Firma ( )" went out to a customer.
+    // Drop any bracket pair the removal emptied; a pair with text left inside
+    // is part of the name and stays.
+    .replaceAll(/[([{]\s*[)\]}]/gu, " ")
     .replaceAll(/[\s,:;-]+$/gu, "")
     .replaceAll(/\s{2,}/gu, " ")
     .trim();

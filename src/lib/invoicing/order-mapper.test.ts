@@ -273,6 +273,38 @@ describe("toInvoiceBuyerInput", () => {
     expect(buyer.companyName).toBe("ACME Sp. z o.o.");
   });
 
+  it("leaves no empty brackets when the NIP was written inside them", () => {
+    const buyer = toInvoiceBuyerInput(
+      medusaOrder({
+        billing_address: {
+          address_1: "Rynek 5",
+          city: "Krakow",
+          company: `NZOZ "Familia" Monika Kwasniak (NIP ${VALID_NIP})`,
+          postal_code: "31-042",
+        },
+        metadata: { nip: VALID_NIP },
+      }),
+      defaultNipExtractor,
+    );
+    expect(buyer.companyName).toBe('NZOZ "Familia" Monika Kwasniak');
+  });
+
+  it("keeps a bracketed part of the name that is not the NIP", () => {
+    const buyer = toInvoiceBuyerInput(
+      medusaOrder({
+        billing_address: {
+          address_1: "Rynek 5",
+          city: "Krakow",
+          company: `Poradnia Lekarska "Medicus" (Oddzial Zachodni) NIP ${VALID_NIP}`,
+          postal_code: "31-042",
+        },
+        metadata: { nip: VALID_NIP },
+      }),
+      defaultNipExtractor,
+    );
+    expect(buyer.companyName).toBe('Poradnia Lekarska "Medicus" (Oddzial Zachodni)');
+  });
+
   it("honours a custom extractor", () => {
     const buyer = toInvoiceBuyerInput(medusaOrder(), () => "PL 526-104-08-28");
     expect(buyer.taxId).toBe("PL 526-104-08-28");
