@@ -150,6 +150,30 @@ A step unwinds by throwing one of three control-flow signals, or a real error:
 Defer not counting an attempt is deliberate: a slow external system must not burn
 the row's retry budget. A row deferred a hundred times has spent nothing.
 
+### Waiting for data is not a review
+
+On a marketplace order the buyer's billing details arrive *with* the payment, so
+the first attempt can run before they exist. The row that exposed this was queued
+at 12:36:24, parked at 12:36:25 for a missing street, city and postal code - and
+the real address was written 16 seconds later.
+
+So the address-incomplete reason, and only that reason, defers instead of
+parking. It is bounded by wall clock rather than by attempts (a defer burns
+none): 60 minutes from the row's `created_at`, after which it becomes the same
+`needs_review` it always was, with the same message plus what the wait proved.
+Every other build refusal - a company name that would reach a legal document
+malformed, a tax id that does not normalize, a VAT id VIES could not confirm -
+parks immediately, inside the window exactly as outside it.
+
+A deferred row carries `defer_reason`, which the order widget renders next to the
+next-check time, so "Awaiting" says what it is awaiting. It is cleared the moment
+the row advances. **No admin notification and no alert is raised for a deferral**;
+that stays for a genuine `needs_review`.
+
+`allegro.order.billing_ready` (from `@zanreal/medusa-allegro`) is subscribed as a
+wake-up, not as a trigger: it advances a row that is already waiting for the
+address it announces, and never enqueues one.
+
 Retries back off as `5 min * 2 ** attempts`, capped at 6 hours, so the first
 retry already waits 10 minutes - the failures worth retrying at all, such as rate
 limits and inFakt outages, do not clear in five. After **8 attempts** the row
@@ -170,9 +194,19 @@ validation dump can be kilobytes long.
 | --- | --- |
 | Worker schedule | `*/5 * * * *`, override with `INFAKT_WORKER_CRON`. The safety net - a paid order is invoiced immediately on `payment.captured`. |
 | Re-check while inFakt or KSeF are still processing | 2 minutes |
+| Riding KSeF to a terminal state inside one run | 5 s, doubling to a 30 s cap, for up to 150 s shared by the whole run |
+| Waiting for buyer data that has not arrived, from `created_at` | 60 minutes |
 | Re-check while the order is not yet fully paid | 30 minutes |
 | Confirming the paid marking took, measured from `paid_marked_at` | 15 minutes |
 | First retry after a failure | 10 minutes, doubling to a 6 hour cap |
+
+Nothing routine waits for the cron. The payment subscriber issues the invoice,
+the billing-ready event wakes a row waiting for an address, the KSeF poll rides
+its own document to a terminal state inside one run, and the admin actions
+(`enqueue`, `retry`, `adopt`, `clear`) run the pipeline as they are clicked.
+Everything is event-driven; the cron is the safety net, never the mechanism. If a
+normal invoice only completes when the tick next fires, that is a defect in the
+event path, not a reason to shorten the interval.
 
 The worker's schedule is an environment variable rather than a plugin option
 because Medusa reads a scheduled job's `config.schedule` at plugin-load time,

@@ -2,7 +2,7 @@ import { describeError, InfaktApiError } from "../infakt/errors";
 import type { InfaktClient } from "../infakt";
 import type { InfaktInvoicePayload, InfaktOssInvoicePayload } from "../infakt/types";
 import type { ResolvedInfaktOptions } from "../options";
-import { buildInfaktInvoicePayload } from "./builder";
+import { ADDRESS_INCOMPLETE_PREFIX, buildInfaktInvoicePayload } from "./builder";
 import type { InvoiceOrderInput } from "./builder";
 import type { IssuedNumberClaim } from "./invoice-number";
 import { collisionReason, findNumberCollision } from "./invoice-number";
@@ -19,15 +19,20 @@ import { alertMessage } from "./threshold";
 import {
   CRASH_WINDOW_MESSAGE,
   classifyKsefStatus,
+  dataWaitSignal,
   deferSignal,
+  KSEF_RIDE_BUDGET_MS,
+  KSEF_RIDE_FIRST_DELAY_MS,
+  KSEF_RIDE_MAX_DELAY_MS,
   nextStep,
   paidConfirmationDue,
   reviewSignal,
   skipSignal,
   truncateError,
   UNPAID_RETRY_MS,
+  withinDataWaitGrace,
 } from "./state-machine";
-import type { InvoiceStateRow, PipelineStep } from "./state-machine";
+import type { InvoiceStateRow, PipelineSignal, PipelineStep } from "./state-machine";
 
 /**
  * One row's journey to completion.
@@ -100,6 +105,17 @@ export interface PipelineDeps {
   raiseAlert?: (message: string) => Promise<void>;
   /** Injected so the "ride the async task to completion" pause is instant in tests. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The wall clock at which THIS RUN stops riding external work to completion.
+   *
+   * One deadline for the whole run, created once by the caller, rather than one
+   * budget per row. That is what bounds how long a batch can hold the
+   * single-flight claim: twenty rows cannot each ride for two and a half
+   * minutes, because they are all racing the same deadline, and once it passes
+   * every remaining row simply defers to the cron - which is what the cron is
+   * for. Absent, each row falls back to its own `KSEF_RIDE_BUDGET_MS`.
+   */
+  rideUntil?: Date;
 }
 
 /**
@@ -341,7 +357,7 @@ async function submitCreate(
         });
   if (!built.ok) {
     // Reasons are PII-free by construction; see builder.ts and oss-builder.ts.
-    throw reviewSignal(built.reason);
+    throw buildFailureSignal(built.reason, row);
   }
 
   // An OSS invoice is always a consumer document, so it is never a KSeF
@@ -359,6 +375,8 @@ async function submitCreate(
   // Re-deriving either on a later tick would let a mid-flight config change
   // silently reclassify an invoice that has already been issued.
   await patch(row, deps, {
+    // The row has stopped waiting for data - whatever it was waiting for is here.
+    defer_reason: null,
     is_company: isCompany,
     ksef_decision_reason: decision.reason,
     ksef_required: decision.file,
@@ -385,6 +403,36 @@ async function submitCreate(
 
   // Try to ride the async task to completion in this run.
   await (deps.sleep ?? defaultSleep)(CREATE_SETTLE_MS);
+}
+
+/**
+ * What a refused payload means: a human's problem, or data that has not landed.
+ *
+ * Almost every build failure is a decision only a person can make - a company
+ * name that would reach a legal document mangled, a VAT id that could not be
+ * confirmed - and every one of those still parks the row exactly as before.
+ *
+ * One reason is different. The buyer's billing details arrive WITH the payment
+ * on a marketplace order, so the first attempt can genuinely run before they
+ * exist: on `order_01M1H1PA8BHJMKFPBZWA78F5XQ` the row was queued at 12:36:24,
+ * parked at 12:36:25 for a missing street, city and postal code, and the real
+ * address was written 16 seconds later. Parking that - terminal, with an admin
+ * notification - is a review request for something that resolves itself.
+ *
+ * So the address-incomplete reason, and only that reason, defers while the row
+ * is young. Matched on the constant the gate itself exports, so re-wording the
+ * message moves both together instead of silently ceasing to match. Past the
+ * grace window it becomes the same `needs_review` it always was, with the same
+ * message plus what the wait proved.
+ */
+function buildFailureSignal(reason: string, row: InvoiceRow): PipelineSignal {
+  if (!reason.startsWith(ADDRESS_INCOMPLETE_PREFIX)) {
+    return reviewSignal(reason);
+  }
+  if (withinDataWaitGrace(row)) {
+    return dataWaitSignal(reason);
+  }
+  return reviewSignal(`${reason} - the order still has no address an hour after it was queued`);
 }
 
 /**
@@ -512,23 +560,64 @@ async function sendToKsef(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
   await patch(row, deps, { ksef_sent_at: new Date() });
 }
 
-/** Step 5: poll KSeF until it assigns a number or rejects the document. */
+/**
+ * Step 5: ride KSeF to a terminal state, then record what it decided.
+ *
+ * KSeF settles in about 90 seconds (84 s and 64 s on the two orders measured),
+ * so polling once and deferring meant an invoice that was accepted at 12:41:27
+ * was only recorded as done at 12:45:09 - the 2-minute defer really waits for
+ * the next 5-minute cron boundary. Nothing about the invoice needed those
+ * minutes; the plugin was simply waiting for a sweep, and a sweep is a safety
+ * net, not the mechanism.
+ *
+ * So this rides the poll on a growing backoff inside the same run, exactly as
+ * `CREATE_SETTLE_MS` already rides the create task, and falls back to the
+ * ordinary defer when it does not settle - the cron still catches it.
+ *
+ * Two bounds, both deliberate:
+ *
+ *  - `ksef_status` is persisted BEFORE every subsequent call, so a crash mid-ride
+ *    resumes from what was actually last seen rather than from memory.
+ *  - the ride is capped by wall clock, and by a deadline SHARED across the whole
+ *    run when the caller supplies one (`deps.rideUntil`). A batch of twenty rows
+ *    therefore cannot each hold the single-flight claim for minutes: they race
+ *    one budget, and whatever is left over defers.
+ */
 async function pollKsef(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
   if (!row.invoice_uuid) {
     throw reviewSignal("no invoice uuid to poll KSeF for");
   }
-  const status = await deps.client.getKsefStatus(row.invoice_uuid);
-  const classified = classifyKsefStatus(status);
 
-  if (classified.kind === "error") {
+  const rideUntil = deps.rideUntil?.getTime() ?? Date.now() + KSEF_RIDE_BUDGET_MS;
+  let waited = 0;
+  let delay = KSEF_RIDE_FIRST_DELAY_MS;
+
+  for (;;) {
+    const status = await deps.client.getKsefStatus(row.invoice_uuid);
+    const classified = classifyKsefStatus(status);
+
+    if (classified.kind === "error") {
+      await patch(row, deps, { ksef_status: status.status });
+      throw reviewSignal(classified.message);
+    }
+    if (classified.kind === "done") {
+      await patch(row, deps, { ksef_number: classified.ksefNumber, ksef_status: status.status });
+      return;
+    }
+
+    // Persisted before the next call, and before the sleep, so nothing about this
+    // ride lives only in memory.
     await patch(row, deps, { ksef_status: status.status });
-    throw reviewSignal(classified.message);
+
+    // Both clocks are checked: `waited` bounds this row on its own, and
+    // `rideUntil` bounds every row in the run together.
+    if (waited + delay > KSEF_RIDE_BUDGET_MS || Date.now() + delay > rideUntil) {
+      throw deferSignal("KSeF is still processing the invoice");
+    }
+    await (deps.sleep ?? defaultSleep)(delay);
+    waited += delay;
+    delay = Math.min(delay * 2, KSEF_RIDE_MAX_DELAY_MS);
   }
-  if (classified.kind === "pending") {
-    await patch(row, deps, { ksef_status: status.status });
-    throw deferSignal("KSeF is still processing the invoice");
-  }
-  await patch(row, deps, { ksef_number: classified.ksefNumber, ksef_status: status.status });
 }
 
 /**

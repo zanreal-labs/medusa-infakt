@@ -589,6 +589,22 @@ export default class InfaktModuleService extends MedusaService({
    * purpose is that only an operator restarts it.
    *
    * Returns at most one row: `order_id` is unique on the table.
+   *
+   * ## The one deliberate difference
+   *
+   * A row deferred because the data it needs had not arrived yet (`defer_reason`
+   * set) is due HERE immediately, whatever its `next_attempt_at` says. That is
+   * not a loosening of the predicate so much as the predicate reading its
+   * caller: this query only runs for an order something just happened to, and
+   * for a data wait that event IS the news that the data arrived. Without it the
+   * fix for the address race defeats itself - the defer writes a
+   * `next_attempt_at`, the marketplace then writes the address and emits, and
+   * the run that fires finds nothing due and waits for the cron anyway.
+   *
+   * Every other defer keeps its `next_attempt_at` exactly as before, because no
+   * event tells us that inFakt finished a task, that KSeF finished a document or
+   * that an order became fully paid. `listDueInvoices` - the cron's unscoped
+   * query - is untouched.
    */
   async listDueInvoicesForOrder(orderId: string): Promise<Record<string, unknown>[]> {
     return rawRows<Record<string, unknown>>(
@@ -597,7 +613,11 @@ export default class InfaktModuleService extends MedusaService({
           where "deleted_at" is null
             and "order_id" = ?
             and "status" in ('pending', 'processing')
-            and ("next_attempt_at" is null or "next_attempt_at" <= ?)
+            and (
+              "next_attempt_at" is null
+              or "next_attempt_at" <= ?
+              or "defer_reason" is not null
+            )
           limit 1`,
         [orderId, new Date()],
       ),

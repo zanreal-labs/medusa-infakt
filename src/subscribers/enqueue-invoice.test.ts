@@ -2,28 +2,20 @@ import type { SubscriberArgs } from "@medusajs/framework";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveEffectiveEnablement } from "../lib/invoicing/enablement";
-import { runInvoicing } from "../lib/invoicing/run";
+import { runInvoicingNow } from "../lib/invoicing/run";
 import { resolveInfaktOptions } from "../lib/options";
 import type { InfaktPluginOptions } from "../lib/options";
 import { INFAKT_MODULE } from "../modules/infakt";
 import enqueueInvoiceSubscriber, { config } from "./enqueue-invoice";
 
-// The runner has its own suite (`src/lib/invoicing/run.test.ts`). What matters
-// here is only that the subscriber asks for the right run and survives it
-// failing.
-vi.mock("../lib/invoicing/run", () => ({ runInvoicing: vi.fn() }));
+// The runner and its swallow-and-log discipline have their own suite
+// (`src/lib/invoicing/run.test.ts`). What matters here is only which run the
+// subscriber asks for, and for which event.
+vi.mock("../lib/invoicing/run", () => ({ runInvoicing: vi.fn(), runInvoicingNow: vi.fn() }));
 
 beforeEach(() => {
-  vi.mocked(runInvoicing).mockReset();
-  vi.mocked(runInvoicing).mockResolvedValue({
-    completed: 1,
-    deferred: 0,
-    failed: 0,
-    processed: 1,
-    reArmed: 0,
-    review: 0,
-    skippedRows: 0,
-  });
+  vi.mocked(runInvoicingNow).mockReset();
+  vi.mocked(runInvoicingNow).mockResolvedValue(undefined);
 });
 
 const logger = () => ({
@@ -95,7 +87,11 @@ describe("config", () => {
     // Medusa binds a subscriber's events from this static export, evaluated before
     // the DI container exists, so the configured trigger cannot narrow it here. The
     // handler enforces the choice instead.
-    expect(config.event).toEqual(["payment.captured", "order.placed"]);
+    expect(config.event).toEqual([
+      "payment.captured",
+      "order.placed",
+      "allegro.order.billing_ready",
+    ]);
   });
 });
 
@@ -191,7 +187,7 @@ describe("enqueueInvoiceSubscriber: issuing the invoice the moment payment lands
   it("runs the invoicing pipeline for that one order, right after enqueueing it", async () => {
     const { container } = harness();
     await run(container, "payment.captured", "pay_1");
-    expect(runInvoicing).toHaveBeenCalledWith(
+    expect(runInvoicingNow).toHaveBeenCalledWith(
       container,
       expect.objectContaining({ orderId: "order_1" }),
     );
@@ -203,60 +199,62 @@ describe("enqueueInvoiceSubscriber: issuing the invoice the moment payment lands
     // handler, and not whether the enqueue happened to create the row.
     const { container } = harness({ enqueue: vi.fn().mockResolvedValue({ created: false }) });
     await run(container, "payment.captured", "pay_1");
-    expect(runInvoicing).toHaveBeenCalledTimes(1);
+    expect(runInvoicingNow).toHaveBeenCalledTimes(1);
   });
 
   it("never starts a run for an event it is ignoring", async () => {
     const { container } = harness();
     await run(container, "order.placed", "order_9");
-    expect(runInvoicing).not.toHaveBeenCalled();
+    expect(runInvoicingNow).not.toHaveBeenCalled();
   });
 
   it("never starts a run while invoicing is paused", async () => {
     const { container } = harness({ invoicingPaused: true });
     await run(container, "payment.captured", "pay_1");
-    expect(runInvoicing).not.toHaveBeenCalled();
+    expect(runInvoicingNow).not.toHaveBeenCalled();
   });
 
   it("never starts a run when the payment has no order behind it", async () => {
     const { container } = harness({ orderId: null });
     await run(container, "payment.captured", "pay_1");
-    expect(runInvoicing).not.toHaveBeenCalled();
+    expect(runInvoicingNow).not.toHaveBeenCalled();
   });
+});
 
-  it("swallows a KSeF refusal and leaves the row for the worker", async () => {
-    // The gate is deliberately unchanged: if KSeF is not ready the refusal stands.
-    // Throwing here would hand the event bus an unbounded retry of a pipeline whose
-    // safety rests on being re-entered deliberately, and the cron is already the
-    // designed retry.
-    vi.mocked(runInvoicing).mockRejectedValue(
-      new Error("KSeF is required but not ready: inFakt reports no active integration"),
+/**
+ * The billing address on a marketplace order arrives AFTER the payment - 16
+ * seconds after it on `order_01M1H1PA8BHJMKFPBZWA78F5XQ`. A row that deferred
+ * waiting for it is waiting for exactly this event.
+ */
+describe("enqueueInvoiceSubscriber: the billing-ready event", () => {
+  it("advances the order's row the moment the address is written", async () => {
+    const { container, graph } = harness();
+    await run(container, "allegro.order.billing_ready", "order_1");
+    expect(graph).not.toHaveBeenCalled();
+    expect(runInvoicingNow).toHaveBeenCalledWith(
+      container,
+      expect.objectContaining({ orderId: "order_1" }),
     );
-    const { container, log } = harness();
-    await expect(run(container, "payment.captured", "pay_1")).resolves.toBeUndefined();
-    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("stays queued"));
   });
 
-  it("swallows any other failure too, and says the worker will retry", async () => {
-    vi.mocked(runInvoicing).mockRejectedValue(new Error("connection reset"));
-    const { container, log } = harness();
-    await expect(run(container, "payment.captured", "pay_1")).resolves.toBeUndefined();
-    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("connection reset"));
+  it("does not enqueue: admission stays with the configured trigger", async () => {
+    // A row created here, before any payment, would hit the fully-paid gate and
+    // defer for 30 minutes, and the payment event that follows could not shorten
+    // that wait - only a data wait is due early.
+    const { container, enqueueOrder } = harness();
+    await run(container, "allegro.order.billing_ready", "order_1");
+    expect(enqueueOrder).not.toHaveBeenCalled();
   });
 
-  it("notes at debug when the run was skipped because another run held the claim", async () => {
-    vi.mocked(runInvoicing).mockResolvedValue({
-      completed: 0,
-      deferred: 0,
-      failed: 0,
-      processed: 0,
-      reArmed: 0,
-      review: 0,
-      skipped: "another invoicing run holds the lock",
-      skippedRows: 0,
-    });
-    const { container, log } = harness();
-    await run(container, "payment.captured", "pay_1");
-    expect(log.debug).toHaveBeenCalledWith(expect.stringContaining("holds the lock"));
+  it("is handled whichever trigger event is configured", async () => {
+    const { container } = harness({ options: { triggerEvent: "order.placed" } });
+    await run(container, "allegro.order.billing_ready", "order_1");
+    expect(runInvoicingNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing while invoicing is off", async () => {
+    const { container } = harness({ invoicingPaused: true });
+    await run(container, "allegro.order.billing_ready", "order_1");
+    expect(runInvoicingNow).not.toHaveBeenCalled();
   });
 });

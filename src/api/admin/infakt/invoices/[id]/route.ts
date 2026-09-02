@@ -2,6 +2,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { MedusaError } from "@medusajs/framework/utils";
 import { InfaktApiError } from "../../../../../lib/infakt";
 import type { OperatorAction } from "../../../../../lib/invoicing/operator-actions";
+import { runInvoicingNow } from "../../../../../lib/invoicing/run";
 import { INFAKT_MODULE } from "../../../../../modules/infakt";
 import type InfaktModuleService from "../../../../../modules/infakt/service";
 import { applyInvoiceActionWorkflow } from "../../../../../workflows/apply-invoice-action";
@@ -30,6 +31,12 @@ const VALID_ACTIONS: readonly OperatorAction[] = ["retry", "adopt", "clear", "sk
  * A refused action answers 409, not 400: the request was well-formed, and it is the
  * row's state that makes it impossible. The reason string is written for the person
  * reading it in the admin UI, and says what to do instead.
+ *
+ * An action that leaves the row runnable - retry, adopt, clear - then runs the
+ * pipeline for that one order immediately, through the same shared runner the
+ * payment subscriber uses. An operator clicking Retry and watching the row sit
+ * there until the next five-minute boundary was the whole complaint; a cron is
+ * the safety net, never the mechanism. `skip` is terminal and starts nothing.
  */
 export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<void> {
   const infakt = req.scope.resolve<InfaktModuleService>(INFAKT_MODULE);
@@ -80,6 +87,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
   if (!result.applied) {
     res.status(409).json({ error: result.refusal, id });
     return;
+  }
+
+  const [patched] = (await infakt.listInfaktInvoices({ id: [id] })) as unknown as {
+    order_id: string;
+    status: string;
+  }[];
+
+  // Terminal rows start nothing: `skip` is a decision not to issue, and a row
+  // already `done` has nowhere left to go.
+  if (patched && patched.status !== "done" && patched.status !== "skipped") {
+    await runInvoicingNow(req.scope, {
+      orderId: patched.order_id,
+      source: `medusa-infakt/admin-${action}`,
+    });
   }
 
   const [invoice] = await infakt.listInfaktInvoices({ id: [id] });

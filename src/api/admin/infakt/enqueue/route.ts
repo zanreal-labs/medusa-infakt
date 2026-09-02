@@ -1,5 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { MedusaError } from "@medusajs/framework/utils";
+import { runInvoicingNow } from "../../../../lib/invoicing/run";
 import { INFAKT_MODULE } from "../../../../modules/infakt";
 import type InfaktModuleService from "../../../../modules/infakt/service";
 
@@ -43,6 +44,11 @@ function describeDisabled(enablement: { reason: string }): string {
  *
  * Queuing an order that is already queued is a no-op, not an error - the response
  * says which happened.
+ *
+ * The row is then advanced immediately, through the same shared runner the
+ * payment subscriber uses. A human is watching this button; leaving them to wait
+ * out a cron boundary for an answer is the defect, not the design. The cron stays
+ * the backstop for whatever the run cannot finish.
  */
 export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<void> {
   const infakt = req.scope.resolve<InfaktModuleService>(INFAKT_MODULE);
@@ -58,11 +64,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
   }
 
   const { created } = await infakt.enqueueOrder(orderId);
+  await runInvoicingNow(req.scope, { orderId, source: "medusa-infakt/admin-enqueue" });
+
+  const [invoice] = await infakt.listInfaktInvoices({ order_id: [orderId] });
   res.json({
     created,
+    invoice,
     note: created
-      ? "queued; the worker will apply the start-date, currency and fully-paid gates on its next tick"
-      : "this order was already queued - nothing changed",
+      ? "queued and processed now; the start-date, currency and fully-paid gates were applied"
+      : "this order was already queued - it was processed again now",
     order_id: orderId,
   });
 }

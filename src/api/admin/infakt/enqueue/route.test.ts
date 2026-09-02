@@ -1,11 +1,18 @@
 import type { MedusaRequest } from "@medusajs/framework/http";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runInvoicingNow } from "../../../../lib/invoicing/run";
 import { mockResponse } from "../__tests__/mock-response";
 import { POST } from "./route";
+
+// The runner has its own suite; here it is the boundary. What matters is that
+// this route starts a run at all - a human is watching this button, and leaving
+// them to wait out a cron boundary was the defect.
+vi.mock("../../../../lib/invoicing/run", () => ({ runInvoicingNow: vi.fn() }));
 
 const service = (overrides: Record<string, unknown> = {}) => ({
   enqueueOrder: vi.fn().mockResolvedValue({ created: true }),
   getEffectiveEnablement: vi.fn().mockResolvedValue({ effectiveEnabled: true, reason: "active" }),
+  listInfaktInvoices: vi.fn().mockResolvedValue([{ id: "inv_1", status: "processing" }]),
   ...overrides,
 });
 
@@ -16,6 +23,11 @@ const request = (svc: unknown, body: Record<string, unknown>): MedusaRequest =>
     query: {},
     scope: { resolve: vi.fn().mockReturnValue(svc) },
   }) as unknown as MedusaRequest;
+
+beforeEach(() => {
+  vi.mocked(runInvoicingNow).mockReset();
+  vi.mocked(runInvoicingNow).mockResolvedValue(undefined);
+});
 
 describe("POST /admin/infakt/enqueue", () => {
   it("requires an order_id", async () => {
@@ -32,6 +44,29 @@ describe("POST /admin/infakt/enqueue", () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ created: true, order_id: "order_1" }),
     );
+  });
+
+  it("processes the order immediately instead of promising a tick", async () => {
+    const svc = service();
+    const res = mockResponse();
+    await POST(request(svc, { order_id: "order_1" }), res);
+    expect(runInvoicingNow).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ orderId: "order_1" }),
+    );
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ note: expect.stringContaining("now") }),
+    );
+  });
+
+  it("does not start a run when the request was refused", async () => {
+    const svc = service({
+      getEffectiveEnablement: vi
+        .fn()
+        .mockResolvedValue({ effectiveEnabled: false, reason: "paused" }),
+    });
+    await expect(POST(request(svc, { order_id: "order_1" }), mockResponse())).rejects.toThrow();
+    expect(runInvoicingNow).not.toHaveBeenCalled();
   });
 
   it("refuses when apiKey is not configured", async () => {

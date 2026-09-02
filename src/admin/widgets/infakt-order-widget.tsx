@@ -434,6 +434,7 @@ const RowDetail = ({
             : t("infakt.orderWidget.buyerConsumer", "consumer")}
         </Field>
         <PaidField row={row} />
+        <WaitingField row={row} />
         <Field
           label={
             row.status === "skipped"
@@ -459,6 +460,31 @@ const RowDetail = ({
 
       <RowActions busy={busy} onAct={onAct} row={row} />
     </div>
+  );
+};
+
+/**
+ * What a row that reads "Awaiting" is actually awaiting.
+ *
+ * A defer writes `status: "processing"`, a `next_attempt_at` and a null
+ * `last_error`, which rendered as "Awaiting" and nothing else - a row waiting for
+ * the buyer's address to arrive looked exactly like one waiting for inFakt to
+ * finish a task. `defer_reason` is set only while the row waits for data and is
+ * cleared the moment it advances, so this field appears exactly when there is
+ * something to say. A short reason and a time, no prose.
+ */
+const WaitingField = ({ row }: { row: InfaktInvoiceRow }) => {
+  const { t } = useTranslation();
+  if (!row.defer_reason) {
+    return null;
+  }
+  return (
+    <Field label={t("infakt.orderWidget.fields.waitingFor", "Waiting for")}>
+      {row.defer_reason}
+      {row.next_attempt_at
+        ? ` (${t("infakt.orderWidget.nextCheck", "next check")} ${formatDate(row.next_attempt_at)})`
+        : ""}
+    </Field>
   );
 };
 

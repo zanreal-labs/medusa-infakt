@@ -131,6 +131,49 @@ describe("order invoicing widget", () => {
     expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
   });
 
+  it("says what a row that reads Awaiting is actually waiting for", async () => {
+    // A defer renders as "Awaiting" with no error, which looked identical whether
+    // the row was waiting for the buyer's address or for inFakt to finish a task.
+    wire(
+      [
+        {
+          attempts: 0,
+          defer_reason: "buyer address is incomplete (missing: street, city, postal_code)",
+          id: "inv_1",
+          in_crash_window: false,
+          is_company: false,
+          next_attempt_at: "2026-09-02T12:38:24.000Z",
+          order_id: "order_1",
+          status: "processing",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText("Waiting for")).toBeTruthy();
+    expect(screen.getByText(/buyer address is incomplete/)).toBeTruthy();
+    expect(screen.getByText(/next check/)).toBeTruthy();
+  });
+
+  it("says nothing about waiting on a row that is not", async () => {
+    wire(
+      [
+        {
+          attempts: 0,
+          id: "inv_1",
+          in_crash_window: false,
+          is_company: false,
+          order_id: "order_1",
+          status: "processing",
+        },
+      ],
+      active,
+    );
+    render(<InfaktOrderWidget data={{ id: "order_1" }} />);
+    expect(await screen.findByText("Awaiting")).toBeTruthy();
+    expect(screen.queryByText("Waiting for")).toBeNull();
+  });
+
   it("says so when inFakt never confirmed the payment", async () => {
     // The invoice is correct and issued; only the bookkeeping is outstanding, and
     // only a person can settle it in inFakt. Two words and a time, no prose.

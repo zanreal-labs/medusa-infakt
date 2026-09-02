@@ -401,6 +401,37 @@ describe("listDueInvoices", () => {
     const { service } = buildService({ rawResult: () => [{ id: "inv_1" }] });
     await expect(service.listDueInvoices(20)).resolves.toEqual([{ id: "inv_1" }]);
   });
+
+  it("never lets a data wait shortcut the unscoped sweep", async () => {
+    // The cron drains whatever is due by the clock. Only the order-scoped query
+    // treats an event as the news that the data arrived.
+    const { rawCalls, service } = buildService();
+    await service.listDueInvoices(20);
+    expect(rawCalls[0].sql).not.toContain("defer_reason");
+  });
+});
+
+describe("listDueInvoicesForOrder", () => {
+  it("shares the due-predicate, so a terminal or backed-off row stays untouchable", async () => {
+    const { rawCalls, service } = buildService();
+    await service.listDueInvoicesForOrder("order_1");
+    const [{ bindings, sql }] = rawCalls;
+    expect(sql).toContain(`"status" in ('pending', 'processing')`);
+    expect(sql).toContain(`"order_id" = ?`);
+    expect(bindings[0]).toBe("order_1");
+    for (const terminal of ["done", "skipped", "needs_review"]) {
+      expect(sql).not.toContain(`'${terminal}'`);
+    }
+  });
+
+  it("makes a row that is waiting for data due right now", async () => {
+    // Without this the address fix defeats itself: the defer writes a
+    // `next_attempt_at`, the marketplace then writes the address and emits, and
+    // the run that fires finds nothing due and waits for the cron anyway.
+    const { rawCalls, service } = buildService();
+    await service.listDueInvoicesForOrder("order_1");
+    expect(rawCalls[0].sql).toContain(`"defer_reason" is not null`);
+  });
 });
 
 describe("enqueueOrder", () => {

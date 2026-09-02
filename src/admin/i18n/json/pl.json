@@ -41,7 +41,8 @@
         "buyer": "Nabywca",
         "skippedOn": "Pominięto",
         "issuedOn": "Wystawiono",
-        "paidInInfakt": "Zapłacono w inFakt"
+        "paidInInfakt": "Zapłacono w inFakt",
+        "waitingFor": "Czeka na"
       },
       "crashWindowDetail": "Poprzednia próba wystawienia mogła dotrzeć do inFakt. Sprawdź, czy nie powstała tam osierocona faktura, a następnie powiąż ją lub wyczyść ten zapis.",
       "history": {
@@ -83,7 +84,8 @@
       },
       "paidConfirmed": "potwierdzone",
       "paidUnconfirmed": "brak potwierdzenia",
-      "paidMarkedAt": "oznaczono"
+      "paidMarkedAt": "oznaczono",
+      "nextCheck": "kolejne sprawdzenie"
     },
     "reconcile": {
       "heading": "Przyjmij istniejące faktury",
