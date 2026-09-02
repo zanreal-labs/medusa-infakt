@@ -51,12 +51,14 @@ export const UNPAID_RETRY_MS = 30 * 60_000;
  * and the invoice `status` it writes is a single last-write-wins enum, which any
  * later action on the document - including a plain PDF download - can overwrite.
  * Several actors in one estate touch a fresh invoice within seconds of each
- * other, so one marking is not evidence of a paid invoice. Fifteen minutes is
- * long enough to survive that opening burst and a couple of worker ticks, and
- * short enough that a document nothing can settle stops being retried the same
- * hour it was issued.
+ * other, so a read-back that does not say "paid" is not evidence that the
+ * marking failed - it is evidence that `status` is the wrong field to trust.
+ *
+ * That is why there is no retry window here any more. Re-marking across ticks
+ * cannot fix a signal that a later actor overwrites anyway, and paying for it
+ * with the row's completion was the wrong trade: see `paidConfirmationDue`.
  */
-export const PAID_CONFIRM_WINDOW_MS = 15 * 60_000;
+export const PAID_SETTLE_MS = 1500;
 /**
  * How long a row may wait for buyer data that has not arrived yet.
  *
@@ -321,11 +323,24 @@ export type PipelineStep =
  *  - `paid_confirmed_at` set means a read-back already showed "paid". It is never
  *    re-checked, so a human downloading the PDF later - which flips the inFakt
  *    status to "printed" - cannot un-confirm a payment that was confirmed.
- *  - past the window the row gives up and completes. An unconfirmed marking is
- *    bookkeeping, not the legal document, and it must never hold an issued
- *    invoice out of `done` indefinitely.
+ *  - `paid_marked_at` set means the marking has already been attempted once.
+ *    It is never attempted again.
+ *
+ * That last refusal is the whole shape of this step, and it was learned the
+ * hard way. An earlier version kept re-marking for fifteen minutes until a
+ * read-back said "paid", deferring the row in between - which held an issued,
+ * KSeF-filed invoice out of `done` for a quarter of an hour whenever anything
+ * else touched the document first. The order-replay harness caught it: its
+ * inFakt fake returns "printed", exactly what a real PDF download produces, and
+ * every replayed order timed out short of completing.
+ *
+ * The trade is deliberate. Payment state is bookkeeping inside inFakt, not part
+ * of the legal document, so it may never gate completion - not indefinitely,
+ * and not for fifteen minutes either. One marking, one read-back for evidence,
+ * then the row completes regardless and an unconfirmed marking is surfaced to
+ * an operator rather than retried behind their back.
  */
-export function paidConfirmationDue(row: InvoiceStateRow, now: number = Date.now()): boolean {
+export function paidConfirmationDue(row: InvoiceStateRow): boolean {
   if (!row.invoice_uuid) {
     return false;
   }
@@ -335,16 +350,10 @@ export function paidConfirmationDue(row: InvoiceStateRow, now: number = Date.now
   if (row.paid_confirmed_at) {
     return false;
   }
-  if (!row.paid_marked_at) {
-    return true;
-  }
-  const markedAt = new Date(row.paid_marked_at).getTime();
-  // An unreadable timestamp is treated as exhausted rather than as "just now":
-  // failing towards completing an already-issued invoice is the safe direction.
-  if (Number.isNaN(markedAt)) {
-    return false;
-  }
-  return now - markedAt < PAID_CONFIRM_WINDOW_MS;
+  // Once, ever. `paid_marked_at` is written whether the marking succeeded or
+  // threw, so this both terminates the pipeline loop and guarantees the step
+  // cannot run a second time on a later tick.
+  return !row.paid_marked_at;
 }
 
 /**

@@ -102,10 +102,10 @@ const InfaktInvoice = model
     /**
      * When this pipeline FIRST asked inFakt to mark the invoice as paid.
      *
-     * Written once, on the first attempt, and never rewritten - including when
-     * the call itself failed. It is the start of the confirmation budget (see
-     * `PAID_CONFIRM_WINDOW_MS`), so re-writing it on every re-mark would make a
-     * marking that can never succeed retry forever.
+     * Written once, on the only attempt, and never rewritten - including when
+     * the call itself failed. It is also what stops the step running twice: a
+     * row that has been marked is never marked again, so the marking can never
+     * hold an issued invoice out of `done`.
      */
     paid_marked_at: model.dateTime().nullable(),
     /**

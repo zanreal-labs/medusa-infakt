@@ -1045,16 +1045,19 @@ describe("processInvoiceRow: confirming the paid marking", () => {
     expect(target.status).toBe("done");
   });
 
-  it("defers instead of completing while inFakt still reports the invoice as sent", async () => {
+  it("completes the row even when inFakt still reports the invoice as sent", async () => {
     const { deps } = harness({
       client: { getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "sent" }) },
     });
     const target = row();
 
-    const thrown = await signal(processInvoiceRow(target, deps));
-    expect(thrown.kind).toBe("defer");
-    // Not a failure: a defer must never burn the row's retry budget.
-    expect(classifyOutcome(thrown, target).attempts).toBe(0);
+    // The regression this guards: an inconclusive read-back must not hold an
+    // issued, KSeF-filed invoice out of `done`. Payment state is bookkeeping
+    // inside inFakt, not part of the legal document.
+    await processInvoiceRow(target, deps);
+
+    expect(target.status).toBe("done");
+    expect(target.completed_at).toBeInstanceOf(Date);
     expect(target.paid_marked_at).toBeInstanceOf(Date);
     expect(target.paid_confirmed_at).toBeUndefined();
     // The document itself is finished - only the bookkeeping is outstanding.
@@ -1062,29 +1065,25 @@ describe("processInvoiceRow: confirming the paid marking", () => {
     expect(target.event_emitted_at).toBeInstanceOf(Date);
   });
 
-  it("re-marks on a later pass and confirms when the status finally turns paid", async () => {
+  it("marks the invoice paid exactly once, never on a later pass", async () => {
     const client = {
-      getInvoice: vi
-        .fn()
-        .mockResolvedValueOnce({ number: "1/07/2026", status: "sent" })
-        .mockResolvedValue({ number: "1/07/2026", status: "paid" }),
+      getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "printed" }),
     };
     const { deps } = harness({ client });
     const target = issuedRow();
 
-    // Pass one: marked, read back as "sent", so the row defers rather than
-    // completing with a payment nobody has confirmed.
-    const thrown = await signal(processInvoiceRow(target, deps));
-    expect(thrown.kind).toBe("defer");
+    // "printed" is what a real PDF download leaves behind, and inFakt's status
+    // is a single last-write-wins enum - so re-marking could never win that
+    // race. It is sent once, read back once, and the row completes.
+    await processInvoiceRow(target, deps);
+    expect(target.status).toBe("done");
     expect(target.paid_confirmed_at).toBeUndefined();
 
-    // Pass two, a tick later: marked AGAIN rather than only reported. Losing the
-    // race to another actor touching the document is the expected failure, and
-    // re-marking an already-paid invoice costs nothing.
+    // A second visit to the same row - a re-run, a resumed worker - must not
+    // send a second marking.
     await processInvoiceRow(target, deps);
 
-    expect(deps.client.markPaid).toHaveBeenCalledTimes(2);
-    expect(target.paid_confirmed_at).toBeInstanceOf(Date);
+    expect(deps.client.markPaid).toHaveBeenCalledTimes(1);
     expect(target.status).toBe("done");
   });
 
