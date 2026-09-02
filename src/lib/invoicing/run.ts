@@ -14,7 +14,7 @@ import { processInvoiceRow } from "./pipeline";
 import type { InvoiceRow, PipelineDeps } from "./pipeline";
 import { warsawDate } from "./money";
 import { MossRateCache } from "./resolve-regime";
-import { classifyOutcome } from "./state-machine";
+import { classifyOutcome, KSEF_RIDE_BUDGET_MS } from "./state-machine";
 import { toInvoiceBuyerInput } from "./order-mapper";
 import type { OperatorActionConfig } from "./operator-actions";
 import { isParkedOnMissingAddress, planAddressReArm } from "./re-arm";
@@ -166,6 +166,68 @@ export async function runInvoicing(
   }
 
   return summary;
+}
+
+/**
+ * Advance ONE order's row right now, instead of leaving it for the next cron
+ * tick.
+ *
+ * Shared by every caller that has just made a row runnable: the payment
+ * subscriber, the billing-ready subscriber, the manual enqueue endpoint and the
+ * operator actions. One implementation, because the discipline below is the
+ * whole reason it is safe to call at all.
+ *
+ * This is the whole latency win, and it is deliberately not a shortcut: it runs
+ * `runInvoicing`, the exact function the cron runs, narrowed to one order. Every
+ * guard therefore still applies, in the same order - the enablement gate, the
+ * atomic single-flight claim, the KSeF readiness refusal, the crash-window check
+ * that writes `submit_started_at` before the create, and the state machine's
+ * terminal statuses.
+ *
+ * ## Racing the cron is safe, and is handled one level down
+ *
+ * A cron tick and this handler can fire on the same row at the same moment. They
+ * cannot both process it, because `claimRun` is a single conditional UPDATE and
+ * the loser gets zero rows back and returns without running. Whichever loses
+ * simply does not run; the row it wanted is still due, and the winner either
+ * finishes it or leaves it exactly as its persisted columns say it is.
+ *
+ * Nothing here re-implements that. Adding a second guard in the subscriber would
+ * be a second thing to keep correct, and the one in the module is the one that is
+ * atomic in the database.
+ *
+ * ## Why every failure is swallowed
+ *
+ * A throwing subscriber is retried by the event bus with no bound and no
+ * visibility, and the retry would re-enter a pipeline whose whole safety argument
+ * rests on being re-entered deliberately. An admin action has the same problem in
+ * a different costume: a 500 on a button tells an operator the row is broken when
+ * it is merely queued. The cron IS the designed retry: the row is already
+ * persisted, so the worst case of a failure here is the five-minute wait this
+ * path exists to avoid, which is exactly where the plugin was before.
+ *
+ * A KSeF-not-ready refusal lands here too, and that is intended: the refusal
+ * stands, the row stays queued, and the cron picks it up once an operator has
+ * fixed the integration.
+ */
+export async function runInvoicingNow(
+  container: MedusaContainer,
+  input: { orderId: string; source: string },
+): Promise<void> {
+  const logger = container.resolve<Logger>(ContainerRegistrationKeys.LOGGER);
+  const { orderId, source } = input;
+  try {
+    const summary = await runInvoicing(container, { orderId, source });
+    if (summary.skipped) {
+      logger.debug?.(
+        `[medusa-infakt] did not invoice order ${orderId} immediately (${summary.skipped}); the worker will pick it up.`,
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      `[medusa-infakt] could not invoice order ${orderId} immediately: ${describeError(error)}. The order stays queued and the invoicing worker will retry it.`,
+    );
+  }
 }
 
 /**
@@ -477,6 +539,16 @@ async function buildDeps(
     mossRates: new MossRateCache(client),
     options,
     /**
+     * One ride budget for the whole run, not one per row.
+     *
+     * A run holds the single-flight claim from start to finish, so a per-row
+     * budget would let a batch of twenty rows hold it for twenty budgets. They
+     * share this deadline instead: the first rows ride KSeF to completion, and
+     * once it passes the rest defer to the cron - which is exactly what the cron
+     * is for.
+     */
+    rideUntil: new Date(Date.now() + KSEF_RIDE_BUDGET_MS),
+    /**
      * Early warning that the OSS threshold is approaching.
      *
      * Routed through the same admin feed a parked invoice uses, so it lands where
@@ -557,6 +629,7 @@ async function recordOutcome(
     summary.skippedRows += 1;
     await infakt.updateInfaktInvoices({
       completed_at: now,
+      defer_reason: null,
       id: row.id,
       last_error: null,
       skip_reason: outcome.message,
@@ -567,7 +640,11 @@ async function recordOutcome(
 
   if (outcome.kind === "deferred") {
     summary.deferred += 1;
+    // `defer_reason` is written on a data-wait defer and cleared on every other
+    // one, so a non-null value always means "waiting for data, right now".
+    // Deliberately no notification: a deferral is not a review request.
     await infakt.updateInfaktInvoices({
+      defer_reason: outcome.deferReason ?? null,
       id: row.id,
       last_error: null,
       next_attempt_at: new Date(now.getTime() + (outcome.delayMs ?? 0)),
@@ -582,6 +659,7 @@ async function recordOutcome(
     );
     await infakt.updateInfaktInvoices({
       attempts: outcome.attempts,
+      defer_reason: null,
       id: row.id,
       last_error: outcome.message,
       status: "needs_review",
@@ -603,6 +681,7 @@ async function recordOutcome(
   );
   await infakt.updateInfaktInvoices({
     attempts: outcome.attempts,
+    defer_reason: null,
     id: row.id,
     last_error: outcome.message,
     next_attempt_at: new Date(now.getTime() + (outcome.delayMs ?? 0)),

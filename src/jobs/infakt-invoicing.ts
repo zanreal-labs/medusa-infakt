@@ -59,9 +59,16 @@ export const config = {
    * options object. Documented in the README where someone would look for the
    * option.
    *
-   * Every five minutes. This is a reconciliation interval, not a latency budget:
-   * the payment subscriber issues the invoice immediately, and nothing a buyer
-   * waits on depends on this tick any more.
+   * Every five minutes, and deliberately no shorter.
+   *
+   * Everything here is event-driven; crons are safety nets, never the mechanism.
+   * If a normal invoice only completes when this tick next fires, that is a
+   * defect in the event path, not a reason to shorten the interval - shortening
+   * it would hide the defect and spend inFakt requests for nothing. The payment
+   * subscriber issues the invoice, the billing-ready event wakes a row that was
+   * waiting for an address, the KSeF poll rides its own document to a terminal
+   * state inside one run, and the admin actions run the pipeline as they are
+   * clicked. This tick exists for what none of those could finish.
    */
   schedule: process.env.INFAKT_WORKER_CRON ?? "*/5 * * * *",
 };

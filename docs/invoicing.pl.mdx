@@ -160,6 +160,31 @@ błędem:
 To, że `defer` nie zużywa próby, jest celowe: powolny system zewnętrzny nie może
 przepalić budżetu ponowień. Wiersz odłożony sto razy nie wydał nic.
 
+### Czekanie na dane to nie weryfikacja
+
+W zamówieniu z marketplace dane nabywcy przychodzą *razem* z płatnością, więc
+pierwsza próba potrafi wystartować, zanim one w ogóle istnieją. Wiersz, który to
+ujawnił, trafił do kolejki o 12:36:24, o 12:36:25 został zaparkowany z powodu
+braku ulicy, miasta i kodu pocztowego - a prawdziwy adres dopisano 16 sekund
+później.
+
+Dlatego powód „niekompletny adres", i wyłącznie ten jeden, odkłada wiersz zamiast
+go parkować. Granicą jest zegar, nie licznik prób (odłożenie żadnej nie zużywa):
+60 minut od `created_at` wiersza, a po tym czasie robi się z tego ten sam
+`needs_review` co zawsze, z tym samym komunikatem i dopiskiem, czego dowiodło
+czekanie. Każda inna odmowa budowania dokumentu - nazwa firmy, która trafiłaby na
+fakturę zniekształcona, NIP, który się nie normalizuje, numer VAT niepotwierdzony
+w VIES - parkuje natychmiast, w oknie dokładnie tak samo jak poza nim.
+
+Odłożony wiersz niesie `defer_reason`, który widget zamówienia pokazuje obok
+czasu kolejnego sprawdzenia, więc „Oczekuje" mówi wreszcie, na co. Kolumna jest
+czyszczona w chwili, gdy wiersz rusza dalej. **Odłożenie nie podnosi żadnego
+powiadomienia w panelu ani alertu** - te zostają dla prawdziwego `needs_review`.
+
+`allegro.order.billing_ready` (z `@zanreal/medusa-allegro`) jest subskrybowane
+jako budzik, nie jako wyzwalacz: popycha wiersz, który już czeka na ogłaszany
+adres, i nigdy nie dodaje nowego do kolejki.
+
 Ponowienia odsuwają się według `5 min * 2 ** próby`, z sufitem 6 godzin, więc
 pierwsze czeka już 10 minut. Awarie, które w ogóle warto ponawiać, czyli limity
 zapytań i przestoje inFaktu, nie mijają w pięć. Po **8 próbach** wiersz idzie do
@@ -180,6 +205,8 @@ Zrzut błędów walidacji z inFaktu potrafi mieć kilka kilobajtów.
 | --- | --- |
 | Harmonogram workera | `*/5 * * * *`, nadpisywany przez `INFAKT_WORKER_CRON`. Siatka bezpieczeństwa - opłacone zamówienie jest fakturowane natychmiast po `payment.captured`. |
 | Sprawdzenie, gdy inFakt albo KSeF wciąż przetwarzają | 2 minuty |
+| Dojeżdżanie KSeF do stanu końcowego w jednym przebiegu | 5 s, podwajane do sufitu 30 s, łącznie do 150 s na cały przebieg |
+| Oczekiwanie na dane nabywcy, liczone od `created_at` | 60 minut |
 | Sprawdzenie, gdy zamówienie nie jest jeszcze opłacone | 30 minut |
 | Potwierdzanie oznaczenia zapłaty, liczone od `paid_marked_at` | 15 minut |
 | Pierwsze ponowienie po błędzie | 10 minut, podwajane do sufitu 6 godzin |

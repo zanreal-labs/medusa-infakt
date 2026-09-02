@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { InfaktApiError } from "../infakt/errors";
+import { ADDRESS_INCOMPLETE_PREFIX } from "./builder";
 import { resolveInfaktOptions } from "../options";
 import type { InfaktPluginOptions } from "../options";
 import { processInvoiceRow } from "./pipeline";
@@ -1161,5 +1162,197 @@ describe("processInvoiceRow: confirming the paid marking", () => {
     expect(client.createInvoiceAsync).not.toHaveBeenCalled();
     expect(client.createOssInvoiceAsync).not.toHaveBeenCalled();
     expect(target.status).toBe("done");
+  });
+});
+
+/**
+ * Waiting for data is not a review.
+ *
+ * Production, order `order_01M1H1PA8BHJMKFPBZWA78F5XQ`:
+ *
+ *     12:36:24  queued order ... for invoicing (payment.captured)
+ *     12:36:25  needs review: buyer address is incomplete (missing: street, city, postal_code)
+ *     12:36:41  (the Allegro drain writes the real billing address - 16 s later)
+ */
+describe("processInvoiceRow: an address that has not arrived yet", () => {
+  const addressless = () =>
+    medusaOrder({
+      billing_address: { country_code: "PL", first_name: "Jan", last_name: "Kowalski" },
+      shipping_address: null,
+    });
+
+  it("defers rather than parking while the row is young", async () => {
+    const { client, deps } = harness({ order: addressless() });
+    const target = row({ created_at: new Date() });
+
+    const thrown = await signal(processInvoiceRow(target, deps));
+
+    expect(thrown.kind).toBe("defer");
+    expect(thrown.message).toContain(ADDRESS_INCOMPLETE_PREFIX);
+    // Nothing reached inFakt: the gate still runs before any call.
+    expect(client.createInvoiceAsync).not.toHaveBeenCalled();
+  });
+
+  it("says what it is waiting for, and burns no attempt doing it", async () => {
+    const { deps } = harness({ order: addressless() });
+    const target = row({ attempts: 3, created_at: new Date() });
+
+    const outcome = classifyOutcome(await signal(processInvoiceRow(target, deps)), target);
+
+    expect(outcome.kind).toBe("deferred");
+    expect(outcome.deferReason).toContain(ADDRESS_INCOMPLETE_PREFIX);
+    // Defers do not count, which is exactly why the window is a wall clock.
+    expect(outcome.attempts).toBe(3);
+  });
+
+  it("parks for a human once the grace window has passed", async () => {
+    const { deps } = harness({ order: addressless() });
+    const target = row({ created_at: new Date(Date.now() - 2 * 60 * 60_000) });
+
+    const thrown = await signal(processInvoiceRow(target, deps));
+
+    expect(thrown.kind).toBe("review");
+    expect(thrown.message).toContain(ADDRESS_INCOMPLETE_PREFIX);
+    expect(thrown.message).toContain("still has no address");
+  });
+
+  it("parks a row whose created_at cannot be read - the safe direction", async () => {
+    const { deps } = harness({ order: addressless() });
+    expect((await signal(processInvoiceRow(row(), deps))).kind).toBe("review");
+  });
+
+  it("still parks every other build refusal immediately, window or not", async () => {
+    // The regression guard. Only the address reason is deferrable. A buyer the
+    // builder refuses for any other reason is a human's decision, today and after
+    // this change - inside the grace window exactly as outside it.
+    const nipWithoutCompany = harness({
+      order: medusaOrder({
+        billing_address: {
+          address_1: "Rynek 5",
+          city: "Krakow",
+          country_code: "PL",
+          postal_code: "31-042",
+        },
+        metadata: { nip: VALID_NIP },
+      }),
+    });
+    const parked = await signal(
+      processInvoiceRow(row({ created_at: new Date() }), nipWithoutCompany.deps),
+    );
+    expect(parked.kind).toBe("review");
+    expect(parked.message).toContain("NIP but no company name");
+
+    const namelessConsumer = harness({
+      order: medusaOrder({
+        billing_address: {
+          address_1: "Prosta 1",
+          city: "Warszawa",
+          country_code: "PL",
+          postal_code: "00-001",
+        },
+      }),
+    });
+    const alsoParked = await signal(
+      processInvoiceRow(row({ created_at: new Date() }), namelessConsumer.deps),
+    );
+    expect(alsoParked.kind).toBe("review");
+    expect(alsoParked.message).toContain("buyer name is missing");
+  });
+
+  it("clears the wait the moment the row advances", async () => {
+    const { deps, updates } = harness();
+    await processInvoiceRow(row({ created_at: new Date(), defer_reason: "waiting" }), deps);
+    // Written in the same patch that freezes the claim, before the create POST.
+    expect(updates.some((patch) => patch.defer_reason === null)).toBe(true);
+  });
+});
+
+/**
+ * KSeF settles in about 90 seconds. Polling once and deferring meant an invoice
+ * accepted at 12:41:27 was only recorded at 12:45:09 - the 2-minute defer really
+ * waits for the next 5-minute cron boundary.
+ */
+describe("processInvoiceRow: riding KSeF to completion", () => {
+  const companyOrder = () =>
+    medusaOrder({
+      billing_address: {
+        address_1: "Rynek 5",
+        city: "Krakow",
+        company: "ACME Sp. z o.o.",
+        country_code: "PL",
+        postal_code: "31-042",
+      },
+      metadata: { nip: VALID_NIP },
+    });
+
+  it("keeps polling inside the same run until KSeF settles", async () => {
+    const getKsefStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "sent" })
+      .mockResolvedValueOnce({ status: "sent" })
+      .mockResolvedValue({ ksefNumber: "K-1", status: "success" });
+    const { deps } = harness({ client: { getKsefStatus }, order: companyOrder() });
+    const target = row();
+
+    await processInvoiceRow(target, deps);
+
+    expect(getKsefStatus).toHaveBeenCalledTimes(3);
+    expect(target.ksef_number).toBe("K-1");
+    expect(target.status).toBe("done");
+  });
+
+  it("persists every status it sees, so a crash mid-ride resumes from reality", async () => {
+    const getKsefStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "sent" })
+      .mockResolvedValue({ ksefNumber: "K-1", status: "success" });
+    const { deps, updates } = harness({ client: { getKsefStatus }, order: companyOrder() });
+
+    await processInvoiceRow(row(), deps);
+
+    expect(updates.filter((patch) => patch.ksef_status === "sent")).toHaveLength(1);
+  });
+
+  it("falls back to a defer when it never settles, without burning an attempt", async () => {
+    const { deps } = harness({
+      client: { getKsefStatus: vi.fn().mockResolvedValue({ status: "sent" }) },
+      order: companyOrder(),
+    });
+    const target = row({ attempts: 2 });
+
+    const thrown = await signal(processInvoiceRow(target, deps));
+
+    expect(thrown.kind).toBe("defer");
+    expect(thrown.message).toContain("KSeF is still processing");
+    expect(classifyOutcome(thrown, target).attempts).toBe(2);
+    expect(target.ksef_status).toBe("sent");
+  });
+
+  it("stops riding at the run's shared deadline, so a batch cannot hold the claim", async () => {
+    // One deadline for the whole run: twenty rows race it rather than each
+    // spending its own budget while the single-flight claim is held.
+    const { deps } = harness({
+      client: { getKsefStatus: vi.fn().mockResolvedValue({ status: "sent" }) },
+      order: companyOrder(),
+    });
+    deps.rideUntil = new Date(Date.now() - 1);
+
+    expect((await signal(processInvoiceRow(row(), deps))).kind).toBe("defer");
+    expect(deps.client.getKsefStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("parks immediately when KSeF rejects the document - a ride is not a retry", async () => {
+    const { deps } = harness({
+      client: {
+        getKsefStatus: vi
+          .fn()
+          .mockResolvedValue({ status: "error", statusDescription: "invalid NIP" }),
+      },
+      order: companyOrder(),
+    });
+
+    const thrown = await signal(processInvoiceRow(row(), deps));
+    expect(thrown.kind).toBe("review");
+    expect(deps.client.getKsefStatus).toHaveBeenCalledTimes(1);
   });
 });

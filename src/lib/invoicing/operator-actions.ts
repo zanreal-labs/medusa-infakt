@@ -108,10 +108,13 @@ function planRetry(row: InvoiceStateRow, emitEvent: boolean): OperatorActionResu
     };
   }
   return {
-    note: "queued for the next worker tick",
+    note: "queued and picked up now",
     ok: true,
     patch: {
       attempts: 0,
+      // Whatever the row was waiting for, an operator has decided it is no
+      // longer waiting for it.
+      defer_reason: null,
       last_error: null,
       next_attempt_at: null,
       status: "processing",
@@ -156,7 +159,7 @@ function planAdopt(
     };
   }
   return {
-    note: `adopted inFakt invoice ${uuid}; the worker will continue from here`,
+    note: `adopted inFakt invoice ${uuid}; continuing from here now`,
     ok: true,
     patch: {
       adopted_at: new Date(),

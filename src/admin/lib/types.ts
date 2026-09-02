@@ -55,6 +55,8 @@ export interface InfaktInvoiceRow {
   /** When a read-back of the invoice showed inFakt's status as "paid". */
   paid_confirmed_at?: string | null;
   last_error?: string | null;
+  /** What a deferred row is waiting for. Null unless it is waiting on data. */
+  defer_reason?: string | null;
   skip_reason?: string | null;
   completed_at?: string | null;
   adopted_at?: string | null;

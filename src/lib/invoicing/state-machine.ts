@@ -57,6 +57,38 @@ export const UNPAID_RETRY_MS = 30 * 60_000;
  * hour it was issued.
  */
 export const PAID_CONFIRM_WINDOW_MS = 15 * 60_000;
+/**
+ * How long a row may wait for buyer data that has not arrived yet.
+ *
+ * Measured from the row's `created_at`, deliberately NOT from an attempt count:
+ * a defer does not burn `attempts` (see the docblock on that column), so
+ * counting them would never terminate.
+ *
+ * Sixty minutes because the wait being bounded is what makes it honest. The gap
+ * this exists for is measured in seconds - on the order that exposed it the
+ * billing address landed 16 s after the payment - and the marketplace drains
+ * that write minutes at worst. An hour is two orders of magnitude of headroom on
+ * the observed case, so a row still empty at the end of it is not slow, it is
+ * missing data, and that IS a human's problem. Shorter would park orders that
+ * were about to resolve themselves; much longer would leave a genuinely broken
+ * order sitting quiet for most of a working day.
+ */
+export const DATA_WAIT_GRACE_MS = 60 * 60_000;
+
+/**
+ * How long one worker run may spend riding KSeF to a terminal state.
+ *
+ * KSeF resolves in about 90 seconds in practice (84 s and 64 s on the two orders
+ * measured), so two and a half minutes covers the normal case with margin and
+ * stops well short of a run that looks hung. Past it the row falls back to the
+ * ordinary defer and the cron catches it, exactly as before.
+ */
+export const KSEF_RIDE_BUDGET_MS = 150_000;
+/** First poll delay in a KSeF ride; doubles up to `KSEF_RIDE_MAX_DELAY_MS`. */
+export const KSEF_RIDE_FIRST_DELAY_MS = 5_000;
+/** Poll-delay ceiling inside a KSeF ride. */
+export const KSEF_RIDE_MAX_DELAY_MS = 30_000;
+
 /** `last_error` cap. An inFakt validation dump can be kilobytes long. */
 export const MAX_ERROR_LENGTH = 300;
 
@@ -94,6 +126,13 @@ export interface InvoiceStateRow {
   next_attempt_at?: Date | string | null;
   /** Last failure, truncated and PII-free. Rendered in the admin UI. */
   last_error?: string | null;
+  /**
+   * Why a row is waiting for data rather than failing, truncated and PII-free.
+   * Set only on a data-wait defer, and cleared the moment the row advances.
+   */
+  defer_reason?: string | null;
+  /** When the row was queued. The clock the data-wait grace window is measured on. */
+  created_at?: Date | string | null;
   skip_reason?: string | null;
   completed_at?: Date | string | null;
   adopted_at?: Date | string | null;
@@ -114,7 +153,10 @@ export interface InvoiceStateRow {
  *
  *  - `defer`: not done, not a failure (inFakt or KSeF still processing, order not
  *    fully paid yet). Retry after `delayMs`, and do NOT count an attempt - a slow
- *    external system must not burn the row's retry budget.
+ *    external system must not burn the row's retry budget. A defer raised because
+ *    data the order will carry has not landed yet additionally carries
+ *    `dataWait`, which is what makes the row legible as "waiting" rather than
+ *    "quietly stuck".
  *  - `review`: terminal, needs a human (a rejection, an ambiguity, the crash
  *    window). Never retried automatically.
  *  - `skip`: intentionally not invoiced (predates the start date, wrong currency,
@@ -126,17 +168,36 @@ export interface InvoiceStateRow {
 export class PipelineSignal extends Error {
   readonly kind: "defer" | "review" | "skip";
   readonly delayMs: number;
+  /** True when this defer is waiting for data the order does not carry yet. */
+  readonly dataWait: boolean;
 
-  constructor(kind: "defer" | "review" | "skip", message: string, delayMs = WAIT_RETRY_MS) {
+  constructor(
+    kind: "defer" | "review" | "skip",
+    message: string,
+    delayMs = WAIT_RETRY_MS,
+    dataWait = false,
+  ) {
     super(message);
     this.name = "PipelineSignal";
     this.kind = kind;
     this.delayMs = delayMs;
+    this.dataWait = dataWait;
   }
 }
 
 export const deferSignal = (message: string, delayMs?: number): PipelineSignal =>
   new PipelineSignal("defer", message, delayMs);
+/**
+ * A defer that says WHAT the row is waiting for, so the wait is visible.
+ *
+ * Distinct from a plain defer in exactly one way: the reason is persisted to
+ * `defer_reason`, which the admin widget renders next to the next-attempt time.
+ * A row that is waiting for the buyer's address to arrive and a row that is
+ * waiting for inFakt to finish a task are both "processing" with no error, and
+ * an operator could not tell them apart.
+ */
+export const dataWaitSignal = (message: string, delayMs?: number): PipelineSignal =>
+  new PipelineSignal("defer", message, delayMs, true);
 export const reviewSignal = (message: string): PipelineSignal =>
   new PipelineSignal("review", message);
 export const skipSignal = (message: string): PipelineSignal => new PipelineSignal("skip", message);
@@ -156,6 +217,28 @@ export function truncateError(message: string): string {
  * already waits 10 minutes, because the failures worth retrying at all
  * (rate limits, inFakt outages) do not clear in 5.
  */
+/**
+ * Is this row still inside the window where missing buyer data is expected?
+ *
+ * A row whose `created_at` cannot be read is treated as OUTSIDE it: parking is
+ * what this code did before the window existed, and `reArmResolvedAddresses`
+ * un-parks exactly this reason once the data lands. Failing towards a state a
+ * machine can still resolve is the safe direction.
+ */
+export function withinDataWaitGrace(
+  row: Pick<InvoiceStateRow, "created_at">,
+  now: number = Date.now(),
+): boolean {
+  if (!row.created_at) {
+    return false;
+  }
+  const createdAt = new Date(row.created_at).getTime();
+  if (Number.isNaN(createdAt)) {
+    return false;
+  }
+  return now - createdAt < DATA_WAIT_GRACE_MS;
+}
+
 export function backoffMs(attempts: number): number {
   return Math.min(MAX_RETRY_MS, BASE_RETRY_MS * 2 ** attempts);
 }
@@ -170,6 +253,8 @@ export interface Outcome {
   delayMs?: number;
   /** Truncated, PII-free message for `last_error` or `skip_reason`. */
   message: string;
+  /** Set only on a data-wait defer; persisted to `defer_reason`. */
+  deferReason?: string;
 }
 
 /**
@@ -189,11 +274,13 @@ export function classifyOutcome(cause: unknown, row: Pick<InvoiceStateRow, "atte
     return { attempts: row.attempts, kind: "skipped", message: truncateError(cause.message) };
   }
   if (cause instanceof PipelineSignal && cause.kind === "defer") {
+    const message = truncateError(cause.message);
     return {
       attempts: row.attempts,
+      ...(cause.dataWait ? { deferReason: message } : {}),
       delayMs: cause.delayMs,
       kind: "deferred",
-      message: truncateError(cause.message),
+      message,
     };
   }
 

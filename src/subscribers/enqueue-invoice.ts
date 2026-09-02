@@ -1,8 +1,7 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
 import type { Logger } from "@medusajs/framework/types";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
-import { describeError } from "../lib/infakt/errors";
-import { runInvoicing } from "../lib/invoicing/run";
+import { runInvoicingNow } from "../lib/invoicing/run";
 import { orderIdForPayment } from "../lib/invoicing/trigger";
 import type { GraphQuery } from "../lib/invoicing/trigger";
 import { INFAKT_MODULE } from "../modules/infakt";
@@ -48,7 +47,29 @@ import type InfaktModuleService from "../modules/infakt/service";
  * export, which is evaluated at module load - before the DI container exists - so
  * the plugin's `triggerEvent` option cannot narrow the subscription itself. It has
  * to be enforced inside the handler, where the module is resolvable.
+ *
+ * ## And one event that is not a trigger
+ *
+ * `allegro.order.billing_ready` fires the moment a marketplace order's billing
+ * address is written, which on a marketplace order happens AFTER the payment: on
+ * `order_01M1H1PA8BHJMKFPBZWA78F5XQ` the payment landed at 12:36:24 and the
+ * address 16 seconds later. A row that deferred waiting for that address is
+ * waiting for exactly this event, so it advances the row immediately instead of
+ * leaving it to the next cron tick.
+ *
+ * It deliberately does NOT enqueue. A row created here, before any payment, would
+ * hit the fully-paid gate and defer for 30 minutes - and the payment event that
+ * follows could not shorten that wait, because only a data wait is due early
+ * (see `listDueInvoicesForOrder`). The configured trigger still owns admission;
+ * this event only says "the thing the row was waiting for is here now".
  */
+/**
+ * Emitted by `@zanreal/medusa-allegro` the moment a marketplace order's billing
+ * address is written. Payload is `{ id: <medusa order id> }`, the same shape as
+ * `order.placed`.
+ */
+const BILLING_READY_EVENT = "allegro.order.billing_ready";
+
 export default async function enqueueInvoiceSubscriber({
   container,
   event,
@@ -60,7 +81,8 @@ export default async function enqueueInvoiceSubscriber({
   // restart.
   const options = await infakt.getEffectiveOptions();
 
-  if (event.name !== options.triggerEvent) {
+  const billingReady = event.name === BILLING_READY_EVENT;
+  if (!(billingReady || event.name === options.triggerEvent)) {
     return;
   }
 
@@ -81,6 +103,17 @@ export default async function enqueueInvoiceSubscriber({
     return;
   }
 
+  if (billingReady) {
+    // Not a trigger: advance whatever is already queued for this order, and do
+    // nothing at all if nothing is. See the note above on why this must not
+    // enqueue.
+    await runInvoicingNow(container, {
+      orderId,
+      source: "medusa-infakt/on-billing-ready",
+    });
+    return;
+  }
+
   const { created } = await infakt.enqueueOrder(orderId);
   if (created) {
     logger.info(`[medusa-infakt] queued order ${orderId} for invoicing (${event.name}).`);
@@ -90,62 +123,7 @@ export default async function enqueueInvoiceSubscriber({
     logger.debug?.(`[medusa-infakt] order ${orderId} is already queued for invoicing.`);
   }
 
-  await issueNow(container, logger, orderId);
-}
-
-/**
- * Advance this order's row right now, instead of leaving it for the next cron
- * tick.
- *
- * This is the whole latency win, and it is deliberately not a shortcut: it runs
- * `runInvoicing`, the exact function the cron runs, narrowed to one order. Every
- * guard therefore still applies, in the same order - the enablement gate, the
- * atomic single-flight claim, the KSeF readiness refusal, the crash-window check
- * that writes `submit_started_at` before the create, and the state machine's
- * terminal statuses.
- *
- * ## Racing the cron is safe, and is handled one level down
- *
- * A cron tick and this handler can fire on the same row at the same moment. They
- * cannot both process it, because `claimRun` is a single conditional UPDATE and
- * the loser gets zero rows back and returns without running. Whichever loses
- * simply does not run; the row it wanted is still due, and the winner either
- * finishes it or leaves it exactly as its persisted columns say it is.
- *
- * Nothing here re-implements that. Adding a second guard in the subscriber would
- * be a second thing to keep correct, and the one in the module is the one that is
- * atomic in the database.
- *
- * ## Why every failure is swallowed
- *
- * A throwing subscriber is retried by the event bus with no bound and no
- * visibility, and the retry would re-enter a pipeline whose whole safety argument
- * rests on being re-entered deliberately. The cron IS the designed retry: the row
- * is already persisted as pending, so the worst case of a failure here is the
- * five-minute wait this path exists to avoid, which is exactly where the plugin
- * was before.
- *
- * A KSeF-not-ready refusal lands here too, and that is intended: the refusal
- * stands, the row stays queued, and the cron picks it up once an operator has
- * fixed the integration.
- */
-async function issueNow(
-  container: SubscriberArgs["container"],
-  logger: Logger,
-  orderId: string,
-): Promise<void> {
-  try {
-    const summary = await runInvoicing(container, { orderId, source: "medusa-infakt/on-capture" });
-    if (summary.skipped) {
-      logger.debug?.(
-        `[medusa-infakt] did not invoice order ${orderId} immediately (${summary.skipped}); the worker will pick it up.`,
-      );
-    }
-  } catch (error) {
-    logger.warn(
-      `[medusa-infakt] could not invoice order ${orderId} immediately: ${describeError(error)}. The order stays queued and the invoicing worker will retry it.`,
-    );
-  }
+  await runInvoicingNow(container, { orderId, source: "medusa-infakt/on-capture" });
 }
 
 async function resolveOrderId(
@@ -153,7 +131,7 @@ async function resolveOrderId(
   eventName: string,
   id: string,
 ): Promise<string | null> {
-  if (eventName === "order.placed") {
+  if (eventName === "order.placed" || eventName === BILLING_READY_EVENT) {
     return id;
   }
   const query = container.resolve<GraphQuery>(ContainerRegistrationKeys.QUERY);
@@ -163,7 +141,11 @@ async function resolveOrderId(
 /**
  * Both triggers are subscribed; the handler ignores the one that is not
  * configured. See the note above on why this cannot be narrowed here.
+ *
+ * `allegro.order.billing_ready` is subscribed too, and is not a trigger: it
+ * carries `{ id: <medusa order id> }` and only wakes a row that is already
+ * waiting for the address it announces.
  */
 export const config: SubscriberConfig = {
-  event: ["payment.captured", "order.placed"],
+  event: ["payment.captured", "order.placed", BILLING_READY_EVENT],
 };

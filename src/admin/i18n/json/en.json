@@ -41,7 +41,8 @@
         "buyer": "Buyer",
         "skippedOn": "Skipped on",
         "issuedOn": "Issued on",
-        "paidInInfakt": "Paid in inFakt"
+        "paidInInfakt": "Paid in inFakt",
+        "waitingFor": "Waiting for"
       },
       "crashWindowDetail": "A previous attempt may have reached inFakt. Look for a stray invoice there, then link it or clear this one.",
       "history": {
@@ -83,7 +84,8 @@
       },
       "paidConfirmed": "confirmed",
       "paidUnconfirmed": "not confirmed",
-      "paidMarkedAt": "marked"
+      "paidMarkedAt": "marked",
+      "nextCheck": "next check"
     },
     "reconcile": {
       "heading": "Adopt existing invoices",
