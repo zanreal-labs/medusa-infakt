@@ -25,7 +25,7 @@ import {
   KSEF_RIDE_FIRST_DELAY_MS,
   KSEF_RIDE_MAX_DELAY_MS,
   nextStep,
-  paidConfirmationDue,
+  PAID_SETTLE_MS,
   reviewSignal,
   skipSignal,
   truncateError,
@@ -135,10 +135,10 @@ const CREATE_SETTLE_MS = 1500;
  * budget: `POST /async/invoices/{uuid}/paid.json` is asynchronous, so HTTP 201
  * means the task was accepted, not that the invoice is paid. Reading the status
  * back in the same breath as the write would prove nothing. If it has not
- * settled the row defers and the next tick reads again - the wait is an
- * optimisation, never a correctness requirement.
+ * settled, the read-back is simply inconclusive and the row completes with the
+ * payment unconfirmed - the wait is an optimisation, never a correctness
+ * requirement.
  */
-const PAID_SETTLE_MS = 1500;
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -685,14 +685,19 @@ async function emitIssued(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
  * report a zero paid price and a non-zero balance. `status === "paid"` is the
  * only authoritative fact, and it is what is read here.
  *
- * ## Why it re-marks rather than only reporting
+ * ## Why it does not re-mark
  *
- * Losing the race is the expected failure, not a broken request, so the answer
- * is to mark again on a later tick and read again. The endpoint is idempotent
- * in the only way that matters: marking an already-paid invoice changes nothing.
- * The budget is a wall clock measured from `paid_marked_at` - see
- * `PAID_CONFIRM_WINDOW_MS` - never an attempt count, because a defer
- * deliberately does not burn `attempts`.
+ * Losing that race is the expected outcome, not a broken request - so re-marking
+ * until the read-back agrees cannot work: whatever overwrote `status` the first
+ * time will overwrite it again. An earlier version tried anyway, deferring the
+ * row between attempts for fifteen minutes, and the only thing it reliably
+ * achieved was holding an issued, KSeF-filed invoice out of `done`.
+ *
+ * So the marking is sent once and read back once, for evidence. If the evidence
+ * is inconclusive the row completes anyway and an operator is told. Guaranteed
+ * settlement bookkeeping needs its own reconciliation against `paid_date`, which
+ * unlike `status` survives a later action on the document - not a retry loop
+ * wedged into the issuing pipeline.
  *
  * `allow_correction` is deliberately NOT sent. It permits inFakt to book an
  * accounting correction, which is the account owner's decision and not this
@@ -743,11 +748,8 @@ async function confirmPaid(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
     await patch(row, deps, { paid_confirmed_at: new Date() });
     return;
   }
-  if (paidConfirmationDue(row)) {
-    throw deferSignal("inFakt has not registered the payment yet - marking it again next tick");
-  }
-  // Out of budget. Say nothing here: the row is about to complete, and
-  // `warnUnconfirmedPayment` reports it there exactly once.
+  // Inconclusive, and that is the end of it. Say nothing here: the row is about
+  // to complete, and `warnUnconfirmedPayment` reports it there exactly once.
 }
 
 /**
