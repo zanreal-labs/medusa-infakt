@@ -21,6 +21,7 @@ import {
   classifyKsefStatus,
   deferSignal,
   nextStep,
+  paidConfirmationDue,
   reviewSignal,
   skipSignal,
   truncateError,
@@ -111,6 +112,18 @@ export interface PipelineDeps {
  */
 const CREATE_SETTLE_MS = 1500;
 
+/**
+ * How long to wait before reading back a freshly marked-paid invoice.
+ *
+ * The same ride as `CREATE_SETTLE_MS`, for the same reason and with the same
+ * budget: `POST /async/invoices/{uuid}/paid.json` is asynchronous, so HTTP 201
+ * means the task was accepted, not that the invoice is paid. Reading the status
+ * back in the same breath as the write would prove nothing. If it has not
+ * settled the row defers and the next tick reads again - the wait is an
+ * optimisation, never a correctness requirement.
+ */
+const PAID_SETTLE_MS = 1500;
+
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -149,8 +162,10 @@ export async function processInvoiceRow(row: InvoiceRow, deps: PipelineDeps): Pr
   }
 
   // Each pass advances exactly one step, so a step that throws leaves the row
-  // exactly where its persisted columns say it is.
-  for (let guard = 0; guard < 8; guard += 1) {
+  // exactly where its persisted columns say it is. The bound is the number of
+  // steps plus headroom: it exists to turn a step that fails to advance the row
+  // into a stalled row rather than a hot loop, not to limit real progress.
+  for (let guard = 0; guard < 12; guard += 1) {
     const { step, crashWindow } = nextStep(row, { emitEvent: deps.options.emitIssuedEvent });
     if (crashWindow) {
       // inFakt has no idempotency key: re-POSTing the create would issue a SECOND
@@ -159,6 +174,7 @@ export async function processInvoiceRow(row: InvoiceRow, deps: PipelineDeps): Pr
       throw reviewSignal(CRASH_WINDOW_MESSAGE);
     }
     if (step === "complete") {
+      warnUnconfirmedPayment(row, deps);
       await patch(row, deps, { completed_at: new Date(), last_error: null, status: "done" });
       return;
     }
@@ -253,7 +269,7 @@ async function runStep(
       return;
     }
     case "resolve-create-task": {
-      await resolveCreateTask(row, order, deps);
+      await resolveCreateTask(row, deps);
       return;
     }
     case "fetch-invoice-number": {
@@ -270,6 +286,10 @@ async function runStep(
     }
     case "emit-event": {
       await emitIssued(row, deps);
+      return;
+    }
+    case "confirm-paid": {
+      await confirmPaid(row, deps);
       return;
     }
     default: {
@@ -430,11 +450,7 @@ function invoiceableCurrency(currency: string, options: ResolvedInfaktOptions): 
 }
 
 /** Step 2: turn the accepted task into a known invoice uuid. */
-async function resolveCreateTask(
-  row: InvoiceRow,
-  order: MedusaOrderLike,
-  deps: PipelineDeps,
-): Promise<void> {
+async function resolveCreateTask(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
   if (!row.task_reference) {
     throw reviewSignal("the create task reference is missing - cannot resolve the invoice");
   }
@@ -451,7 +467,6 @@ async function resolveCreateTask(
     invoice_number: status.invoiceNumber ?? null,
     invoice_uuid: status.invoiceUuid,
   });
-  await markPaidBestEffort(row, order, deps);
 }
 
 /** Step 3: read the number inFakt assigned. */
@@ -562,30 +577,105 @@ async function emitIssued(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
 }
 
 /**
- * Tell inFakt the invoice is paid. Best-effort by design.
+ * Step 7, and the last thing this pipeline does: tell inFakt the invoice is
+ * paid, then read the invoice back and prove the marking took.
  *
- * Payment state is bookkeeping inside inFakt, not part of the legal document, so
- * this never blocks the pipeline. A re-run after a crash may hit "already paid",
- * which is fine.
+ * ## Why a marking is not evidence
+ *
+ * `POST /async/invoices/{uuid}/paid.json` is asynchronous - HTTP 201 means the
+ * task was accepted, not that the invoice is paid - and the `status` it
+ * eventually writes is a single last-write-wins enum (`draft`, `sent`,
+ * `printed`, `paid`). Any later action on the document overwrites it, including
+ * a plain PDF download (see the docblock on `getInvoicePdf` in
+ * `src/lib/infakt/client.ts`). In one estate several actors touch a fresh
+ * invoice within seconds of it being issued, so firing the marking and moving on
+ * leaves the invoice showing as awaiting payment with nobody the wiser. That is
+ * what this step exists to stop.
+ *
+ * `paid_price` and `left_to_pay` are NOT the signal - a fully paid invoice can
+ * report a zero paid price and a non-zero balance. `status === "paid"` is the
+ * only authoritative fact, and it is what is read here.
+ *
+ * ## Why it re-marks rather than only reporting
+ *
+ * Losing the race is the expected failure, not a broken request, so the answer
+ * is to mark again on a later tick and read again. The endpoint is idempotent
+ * in the only way that matters: marking an already-paid invoice changes nothing.
+ * The budget is a wall clock measured from `paid_marked_at` - see
+ * `PAID_CONFIRM_WINDOW_MS` - never an attempt count, because a defer
+ * deliberately does not burn `attempts`.
+ *
+ * `allow_correction` is deliberately NOT sent. It permits inFakt to book an
+ * accounting correction, which is the account owner's decision and not this
+ * plugin's to make on their behalf.
+ *
+ * Still best-effort in the sense that matters: the invoice is already issued,
+ * already numbered and already filed to KSeF by the time this runs, and nothing
+ * here can fail or park it. The worst outcome is a row that completes with the
+ * payment unconfirmed, which is warned about and shown in the admin widget.
  */
-async function markPaidBestEffort(
-  row: InvoiceRow,
-  order: MedusaOrderLike,
-  deps: PipelineDeps,
-): Promise<void> {
-  if (!row.invoice_uuid) {
+async function confirmPaid(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
+  const uuid = row.invoice_uuid;
+  if (!uuid) {
+    // Unreachable: `paidConfirmationDue` refuses a row with no invoice.
     return;
   }
+
+  const firstMarking = !row.paid_marked_at;
   try {
     // The paid date must not precede the invoice date, and the invoice is dated
     // today in Warsaw - so today is the only always-valid value. An order paid
     // last week is still recorded as settled, just not back-dated.
-    await deps.client.markPaid(row.invoice_uuid, warsawDate());
+    await deps.client.markPaid(uuid, warsawDate());
   } catch (error) {
     deps.logger.warn(
-      `[medusa-infakt] mark-paid failed for invoice ${row.invoice_uuid} (order ${order.id}): ${describeError(error)}`,
+      `[medusa-infakt] mark-paid failed for invoice ${uuid} (order ${row.order_id}): ${describeError(error)}`,
     );
   }
+  if (firstMarking) {
+    // Written even when the call above threw, and never rewritten afterwards.
+    // It is what bounds the retry window, so a marking that can never succeed
+    // has to start the clock rather than reset it on every pass.
+    await patch(row, deps, { paid_marked_at: new Date() });
+  }
+
+  let confirmed = false;
+  try {
+    await (deps.sleep ?? defaultSleep)(PAID_SETTLE_MS);
+    const invoice = await deps.client.getInvoice(uuid);
+    confirmed = invoice.status === "paid";
+  } catch (error) {
+    deps.logger.warn(
+      `[medusa-infakt] could not read back the paid status of invoice ${uuid} (order ${row.order_id}): ${describeError(error)}`,
+    );
+  }
+
+  if (confirmed) {
+    await patch(row, deps, { paid_confirmed_at: new Date() });
+    return;
+  }
+  if (paidConfirmationDue(row)) {
+    throw deferSignal("inFakt has not registered the payment yet - marking it again next tick");
+  }
+  // Out of budget. Say nothing here: the row is about to complete, and
+  // `warnUnconfirmedPayment` reports it there exactly once.
+}
+
+/**
+ * Say out loud that an issued invoice is completing with its payment unconfirmed.
+ *
+ * At completion rather than at the last retry, because that is the one moment
+ * that happens exactly once per row whichever way the budget ran out. Carries the
+ * invoice uuid and the order id and nothing else - no buyer data, as everywhere
+ * else in this file.
+ */
+function warnUnconfirmedPayment(row: InvoiceRow, deps: PipelineDeps): void {
+  if (!(row.paid_marked_at && row.invoice_uuid) || row.paid_confirmed_at) {
+    return;
+  }
+  deps.logger.warn(
+    `[medusa-infakt] invoice ${row.invoice_uuid} (order ${row.order_id}) was marked paid in inFakt but never read back as paid - inFakt still shows it awaiting payment; settle it there by hand`,
+  );
 }
 
 async function ksefStatusOrNull(uuid: string, deps: PipelineDeps) {

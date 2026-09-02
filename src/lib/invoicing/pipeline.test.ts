@@ -62,7 +62,7 @@ const harness = (config?: {
     createInvoiceAsync: vi
       .fn()
       .mockResolvedValue({ invoiceTaskReferenceNumber: "ref-1", processingCode: 100 }),
-    getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", uuid: "u-1" }),
+    getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "paid", uuid: "u-1" }),
     getInvoiceTaskStatus: vi
       .fn()
       .mockResolvedValue({ done: true, failed: false, invoiceUuid: "u-1", processingCode: 201 }),
@@ -1005,5 +1005,161 @@ describe("the invoice-number collision guard", () => {
     });
     await processInvoiceRow(row(), deps);
     expect(emitted).toHaveLength(1);
+  });
+});
+
+/**
+ * The paid marking, and why "we called it" is not "it happened".
+ *
+ * inFakt's paid endpoint is asynchronous and the `status` it writes is a single
+ * last-write-wins enum, so the marking has to be read back rather than assumed.
+ * Production invoice 2/09/2026 is the case these pin: marked at 12:40:03 UTC,
+ * and still `status: "sent"` afterwards.
+ */
+describe("processInvoiceRow: confirming the paid marking", () => {
+  const issuedRow = (overrides: Partial<InvoiceRow> = {}): InvoiceRow =>
+    row({
+      event_emitted_at: new Date("2026-09-02T12:40:00Z"),
+      invoice_number: "1/07/2026",
+      invoice_uuid: "u-1",
+      ksef_required: false,
+      status: "processing",
+      ...overrides,
+    });
+
+  it("marks the invoice paid and confirms it on the first read-back", async () => {
+    const { client, deps } = harness();
+    const target = row();
+    await processInvoiceRow(target, deps);
+
+    expect(client.markPaid).toHaveBeenCalledWith(
+      "u-1",
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/u),
+    );
+    // No amount field is sent, and `allow_correction` is deliberately never set:
+    // booking an accounting correction is the account owner's decision.
+    expect(client.markPaid).toHaveBeenCalledTimes(1);
+    expect(target.paid_marked_at).toBeInstanceOf(Date);
+    expect(target.paid_confirmed_at).toBeInstanceOf(Date);
+    expect(target.status).toBe("done");
+  });
+
+  it("defers instead of completing while inFakt still reports the invoice as sent", async () => {
+    const { deps } = harness({
+      client: { getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "sent" }) },
+    });
+    const target = row();
+
+    const thrown = await signal(processInvoiceRow(target, deps));
+    expect(thrown.kind).toBe("defer");
+    // Not a failure: a defer must never burn the row's retry budget.
+    expect(classifyOutcome(thrown, target).attempts).toBe(0);
+    expect(target.paid_marked_at).toBeInstanceOf(Date);
+    expect(target.paid_confirmed_at).toBeUndefined();
+    // The document itself is finished - only the bookkeeping is outstanding.
+    expect(target.invoice_number).toBe("1/07/2026");
+    expect(target.event_emitted_at).toBeInstanceOf(Date);
+  });
+
+  it("re-marks on a later pass and confirms when the status finally turns paid", async () => {
+    const client = {
+      getInvoice: vi
+        .fn()
+        .mockResolvedValueOnce({ number: "1/07/2026", status: "sent" })
+        .mockResolvedValue({ number: "1/07/2026", status: "paid" }),
+    };
+    const { deps } = harness({ client });
+    const target = issuedRow();
+
+    // Pass one: marked, read back as "sent", so the row defers rather than
+    // completing with a payment nobody has confirmed.
+    const thrown = await signal(processInvoiceRow(target, deps));
+    expect(thrown.kind).toBe("defer");
+    expect(target.paid_confirmed_at).toBeUndefined();
+
+    // Pass two, a tick later: marked AGAIN rather than only reported. Losing the
+    // race to another actor touching the document is the expected failure, and
+    // re-marking an already-paid invoice costs nothing.
+    await processInvoiceRow(target, deps);
+
+    expect(deps.client.markPaid).toHaveBeenCalledTimes(2);
+    expect(target.paid_confirmed_at).toBeInstanceOf(Date);
+    expect(target.status).toBe("done");
+  });
+
+  it("completes the row with a warning once the confirmation budget is spent", async () => {
+    const { deps } = harness({
+      client: { getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "sent" }) },
+    });
+    const target = issuedRow({ paid_marked_at: new Date(Date.now() - 60 * 60_000) });
+
+    await processInvoiceRow(target, deps);
+
+    expect(target.status).toBe("done");
+    expect(target.paid_confirmed_at).toBeUndefined();
+    // Past the window the row is not even re-marked - it just completes, loudly.
+    expect(deps.client.markPaid).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("never read back as paid"));
+  });
+
+  it("still completes the issuance when the mark-paid call itself throws", async () => {
+    const { deps } = harness({
+      client: {
+        getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "paid" }),
+        markPaid: vi
+          .fn()
+          .mockRejectedValue(new InfaktApiError({ httpStatus: 500, message: "inFakt is down" })),
+      },
+    });
+    const target = row();
+
+    await processInvoiceRow(target, deps);
+
+    expect(target.status).toBe("done");
+    expect(target.invoice_uuid).toBe("u-1");
+    // The attempt is still recorded, so the budget starts even when the call fails.
+    expect(target.paid_marked_at).toBeInstanceOf(Date);
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("mark-paid failed"));
+  });
+
+  it("never re-marks a row whose payment was already confirmed", async () => {
+    // A human downloading the PDF flips the inFakt status to "printed". That must
+    // not be read as a payment coming undone, so a confirmed row is never re-read.
+    const { deps } = harness({
+      client: { getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "printed" }) },
+    });
+    const target = issuedRow({
+      paid_confirmed_at: new Date("2026-09-02T12:41:00Z"),
+      paid_marked_at: new Date("2026-09-02T12:40:00Z"),
+    });
+
+    await processInvoiceRow(target, deps);
+
+    expect(deps.client.markPaid).not.toHaveBeenCalled();
+    expect(deps.client.getInvoice).not.toHaveBeenCalled();
+    expect(target.status).toBe("done");
+  });
+
+  it("never marks an adopted invoice paid - it is not this pipeline's document", async () => {
+    const { deps } = harness();
+    const target = issuedRow({ adopted_at: new Date("2026-09-01T10:00:00Z") });
+
+    await processInvoiceRow(target, deps);
+
+    expect(deps.client.markPaid).not.toHaveBeenCalled();
+    expect(target.status).toBe("done");
+  });
+
+  it("re-enters a row that already has an invoice without creating a second one", async () => {
+    // The idempotency floor: whatever else changes, a row carrying an
+    // `invoice_uuid` must never reach the create call again.
+    const { client, deps } = harness();
+    const target = issuedRow({ paid_marked_at: new Date(Date.now() - 60_000) });
+
+    await processInvoiceRow(target, deps);
+
+    expect(client.createInvoiceAsync).not.toHaveBeenCalled();
+    expect(client.createOssInvoiceAsync).not.toHaveBeenCalled();
+    expect(target.status).toBe("done");
   });
 });

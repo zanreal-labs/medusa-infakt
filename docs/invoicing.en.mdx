@@ -81,6 +81,7 @@ The next step is derived purely from which columns are still null:
   invoice_number null?                          -> fetch-invoice-number
   ksef_required and no ksef_number?             -> ksef_sent_at set ? poll-ksef : send-to-ksef
   emitEvent and no event_emitted_at?            -> emit-event
+  paid_confirmed_at null, within the window?    -> confirm-paid
   otherwise                                     -> complete
 ```
 
@@ -88,6 +89,32 @@ There is no step counter and no progress held in memory, which is exactly what
 makes a crash at any instant recoverable. The pure rules live in
 `src/lib/invoicing/state-machine.ts` with no database and no HTTP client, so the
 crash-safety properties are unit-testable.
+
+## Marking the invoice paid
+
+The last step, and deliberately the last: `POST /async/invoices/{uuid}/paid.json`
+is asynchronous - HTTP 201 means the task was accepted, not that the invoice is
+paid - and the `status` it eventually writes is a single last-write-wins enum
+(`draft`, `sent`, `printed`, `paid`). Any later action on the document overwrites
+it, including a plain PDF download. So the marking is read back rather than
+assumed:
+
+1. `markPaid` is sent (no amount field exists on that endpoint, and
+   `allow_correction` is never sent - booking an accounting correction is the
+   account owner's decision).
+2. `paid_marked_at` is written once, on the first attempt, even if the call
+   failed. It starts the confirmation budget and is never rewritten.
+3. The invoice is read back. `status === "paid"` - not `paid_price` or
+   `left_to_pay`, which can both look wrong on a fully paid invoice - sets
+   `paid_confirmed_at`.
+4. Unconfirmed, the row defers and marks again on the next tick, for up to 15
+   minutes from `paid_marked_at`. Then it completes anyway, with a warning naming
+   the invoice uuid and the order, and the admin widget shows "not confirmed".
+
+Once `paid_confirmed_at` is set the payment is never re-checked. A human
+downloading the PDF flips the inFakt status to "printed", and that must not read
+as a payment coming undone. An **adopted** invoice is never marked at all: it is
+not this pipeline's document.
 
 ## The crash window
 
@@ -144,6 +171,7 @@ validation dump can be kilobytes long.
 | Worker schedule | `*/5 * * * *`, override with `INFAKT_WORKER_CRON`. The safety net - a paid order is invoiced immediately on `payment.captured`. |
 | Re-check while inFakt or KSeF are still processing | 2 minutes |
 | Re-check while the order is not yet fully paid | 30 minutes |
+| Confirming the paid marking took, measured from `paid_marked_at` | 15 minutes |
 | First retry after a failure | 10 minutes, doubling to a 6 hour cap |
 
 The worker's schedule is an environment variable rather than a plugin option

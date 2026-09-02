@@ -40,7 +40,8 @@
         "ksef": "KSeF",
         "buyer": "Buyer",
         "skippedOn": "Skipped on",
-        "issuedOn": "Issued on"
+        "issuedOn": "Issued on",
+        "paidInInfakt": "Paid in inFakt"
       },
       "crashWindowDetail": "A previous attempt may have reached inFakt. Look for a stray invoice there, then link it or clear this one.",
       "history": {
@@ -79,7 +80,10 @@
         "description": "A reason is required and is kept on the record - skipping is a decision not to issue a document you may be required to issue.",
         "reasonPlaceholder": "e.g. test order, invoiced manually outside Medusa, duplicate of order ...",
         "action": "Skip"
-      }
+      },
+      "paidConfirmed": "confirmed",
+      "paidUnconfirmed": "not confirmed",
+      "paidMarkedAt": "marked"
     },
     "reconcile": {
       "heading": "Adopt existing invoices",

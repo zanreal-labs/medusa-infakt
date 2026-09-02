@@ -85,6 +85,29 @@ const InfaktInvoice = model
     last_error: model.text().nullable(),
     /** Earliest time the worker may pick this row up again. */
     next_attempt_at: model.dateTime().nullable(),
+    /**
+     * When this pipeline FIRST asked inFakt to mark the invoice as paid.
+     *
+     * Written once, on the first attempt, and never rewritten - including when
+     * the call itself failed. It is the start of the confirmation budget (see
+     * `PAID_CONFIRM_WINDOW_MS`), so re-writing it on every re-mark would make a
+     * marking that can never succeed retry forever.
+     */
+    paid_marked_at: model.dateTime().nullable(),
+    /**
+     * When a read-back of the invoice showed inFakt's `status` as "paid".
+     *
+     * The marking endpoint is asynchronous and the status it writes is a single
+     * last-write-wins enum that any later action can overwrite, so having called
+     * it is not evidence that it took - only reading it back is. Once this is
+     * set the payment is never re-checked and never re-marked: a human later
+     * downloading the PDF flips the inFakt status to "printed", and that must not
+     * be read as a payment coming undone.
+     *
+     * Null against a non-null `paid_marked_at` is the visible defect state: the
+     * invoice is issued but inFakt still shows it awaiting payment.
+     */
+    paid_confirmed_at: model.dateTime().nullable(),
     /** The Medusa order. Unique - one pipeline per order, ever. */
     order_id: model.text().unique(),
     /**

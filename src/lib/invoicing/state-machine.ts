@@ -40,6 +40,23 @@ export const MAX_RETRY_MS = 6 * 60 * 60_000;
 export const WAIT_RETRY_MS = 2 * 60_000;
 /** Re-check cadence while an order is still being paid. */
 export const UNPAID_RETRY_MS = 30 * 60_000;
+/**
+ * How long the pipeline keeps trying to see its own paid marking take effect.
+ *
+ * Measured from `paid_marked_at`, which is written once on the FIRST marking
+ * attempt and never rewritten - so this window always terminates rather than
+ * sliding forward with every re-mark.
+ *
+ * inFakt's paid endpoint is asynchronous (HTTP 201 means accepted, not applied)
+ * and the invoice `status` it writes is a single last-write-wins enum, which any
+ * later action on the document - including a plain PDF download - can overwrite.
+ * Several actors in one estate touch a fresh invoice within seconds of each
+ * other, so one marking is not evidence of a paid invoice. Fifteen minutes is
+ * long enough to survive that opening burst and a couple of worker ticks, and
+ * short enough that a document nothing can settle stops being retried the same
+ * hour it was issued.
+ */
+export const PAID_CONFIRM_WINDOW_MS = 15 * 60_000;
 /** `last_error` cap. An inFakt validation dump can be kilobytes long. */
 export const MAX_ERROR_LENGTH = 300;
 
@@ -68,6 +85,10 @@ export interface InvoiceStateRow {
   ksef_status?: string | null;
   ksef_number?: string | null;
   event_emitted_at?: Date | string | null;
+  /** When the pipeline FIRST asked inFakt to mark the invoice paid. Never rewritten. */
+  paid_marked_at?: Date | string | null;
+  /** When a read-back of the invoice showed `status: "paid"`. Terminal. */
+  paid_confirmed_at?: Date | string | null;
   attempts: number;
   /** Earliest time the worker may pick the row up again. */
   next_attempt_at?: Date | string | null;
@@ -196,7 +217,48 @@ export type PipelineStep =
   | "send-to-ksef"
   | "poll-ksef"
   | "emit-event"
+  | "confirm-paid"
   | "complete";
+
+/**
+ * Whether the row still owes inFakt a paid marking, or a confirmation of one.
+ *
+ * Four refusals, in order, and each one matters:
+ *
+ *  - no invoice, nothing to mark;
+ *  - an ADOPTED invoice is not this pipeline's document. It existed before the
+ *    row did, its payment bookkeeping was whoever issued it's to do, and writing
+ *    today's paid date onto it is a change to an accounting record nobody asked
+ *    for. This is also exactly the scope the marking had before it moved: it ran
+ *    only on an invoice this pipeline had just created.
+ *  - `paid_confirmed_at` set means a read-back already showed "paid". It is never
+ *    re-checked, so a human downloading the PDF later - which flips the inFakt
+ *    status to "printed" - cannot un-confirm a payment that was confirmed.
+ *  - past the window the row gives up and completes. An unconfirmed marking is
+ *    bookkeeping, not the legal document, and it must never hold an issued
+ *    invoice out of `done` indefinitely.
+ */
+export function paidConfirmationDue(row: InvoiceStateRow, now: number = Date.now()): boolean {
+  if (!row.invoice_uuid) {
+    return false;
+  }
+  if (row.adopted_at) {
+    return false;
+  }
+  if (row.paid_confirmed_at) {
+    return false;
+  }
+  if (!row.paid_marked_at) {
+    return true;
+  }
+  const markedAt = new Date(row.paid_marked_at).getTime();
+  // An unreadable timestamp is treated as exhausted rather than as "just now":
+  // failing towards completing an already-issued invoice is the safe direction.
+  if (Number.isNaN(markedAt)) {
+    return false;
+  }
+  return now - markedAt < PAID_CONFIRM_WINDOW_MS;
+}
 
 /**
  * Which step a row is due for, derived purely from its persisted columns.
@@ -230,6 +292,11 @@ export function nextStep(
   }
   if (options.emitEvent && !row.event_emitted_at) {
     return { step: "emit-event" };
+  }
+  // Last, deliberately: the paid marking is the one thing whose result a LATER
+  // action can overwrite, so nothing this pipeline does may follow it.
+  if (paidConfirmationDue(row)) {
+    return { step: "confirm-paid" };
   }
   return { step: "complete" };
 }
