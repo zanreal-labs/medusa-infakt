@@ -40,7 +40,8 @@
         "ksef": "KSeF",
         "buyer": "Nabywca",
         "skippedOn": "Pominięto",
-        "issuedOn": "Wystawiono"
+        "issuedOn": "Wystawiono",
+        "paidInInfakt": "Zapłacono w inFakt"
       },
       "crashWindowDetail": "Poprzednia próba wystawienia mogła dotrzeć do inFakt. Sprawdź, czy nie powstała tam osierocona faktura, a następnie powiąż ją lub wyczyść ten zapis.",
       "history": {
@@ -79,7 +80,10 @@
         "description": "Podanie powodu jest wymagane i zostaje zapisane na koncie - pominięcie to świadoma decyzja o niewystawieniu dokumentu, który możesz mieć obowiązek wystawić.",
         "reasonPlaceholder": "np. zamówienie testowe, faktura wystawiona ręcznie poza Medusa, duplikat zamówienia ...",
         "action": "Pomiń"
-      }
+      },
+      "paidConfirmed": "potwierdzone",
+      "paidUnconfirmed": "brak potwierdzenia",
+      "paidMarkedAt": "oznaczono"
     },
     "reconcile": {
       "heading": "Przyjmij istniejące faktury",

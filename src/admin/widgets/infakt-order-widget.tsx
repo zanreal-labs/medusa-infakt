@@ -433,6 +433,7 @@ const RowDetail = ({
             ? t("infakt.orderWidget.buyerCompany", "company (B2B)")
             : t("infakt.orderWidget.buyerConsumer", "consumer")}
         </Field>
+        <PaidField row={row} />
         <Field
           label={
             row.status === "skipped"
@@ -458,6 +459,29 @@ const RowDetail = ({
 
       <RowActions busy={busy} onAct={onAct} row={row} />
     </div>
+  );
+};
+
+/**
+ * Whether inFakt agrees the invoice is paid.
+ *
+ * Rendered only once a marking has been attempted, so it never appears on a
+ * skipped order or a historical import. Two words and a time: "confirmed" is the
+ * settled case, "not confirmed" is the one worth an operator's eye - the invoice
+ * exists and is correct, but inFakt still shows it awaiting payment, and only a
+ * person can settle it there.
+ */
+const PaidField = ({ row }: { row: InfaktInvoiceRow }) => {
+  const { t } = useTranslation();
+  if (!row.paid_marked_at) {
+    return null;
+  }
+  return (
+    <Field label={t("infakt.orderWidget.fields.paidInInfakt", "Paid in inFakt")}>
+      {row.paid_confirmed_at
+        ? `${t("infakt.orderWidget.paidConfirmed", "confirmed")} ${formatDate(row.paid_confirmed_at)}`
+        : `${t("infakt.orderWidget.paidUnconfirmed", "not confirmed")} (${t("infakt.orderWidget.paidMarkedAt", "marked")} ${formatDate(row.paid_marked_at)})`}
+    </Field>
   );
 };
 

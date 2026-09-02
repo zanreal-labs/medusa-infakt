@@ -220,6 +220,7 @@ describe("nextStep", () => {
       invoice_uuid: "u-1",
       ksef_number: "K-1",
       ksef_required: true,
+      paid_confirmed_at: new Date(),
     });
     expect(nextStep(pending, options)).toEqual({ step: "emit-event" });
     expect(nextStep({ ...pending, event_emitted_at: new Date() }, options)).toEqual({
@@ -227,9 +228,33 @@ describe("nextStep", () => {
     });
   });
 
+  it("confirms the paid marking last, after everything else has settled", () => {
+    const issued = row({
+      event_emitted_at: new Date(),
+      invoice_number: "1/2026",
+      invoice_uuid: "u-1",
+      ksef_required: false,
+    });
+    // Nothing this pipeline does may follow the marking, because inFakt's status
+    // is last-write-wins and a later action would overwrite it.
+    expect(nextStep(issued, options)).toEqual({ step: "confirm-paid" });
+    expect(nextStep({ ...issued, paid_confirmed_at: new Date() }, options)).toEqual({
+      step: "complete",
+    });
+    // Spent budget: measured from the FIRST marking, so it always terminates.
+    expect(
+      nextStep({ ...issued, paid_marked_at: new Date(Date.now() - 60 * 60_000) }, options),
+    ).toEqual({ step: "complete" });
+    // An adopted invoice is not this pipeline's document to settle.
+    expect(nextStep({ ...issued, adopted_at: new Date() }, options)).toEqual({ step: "complete" });
+  });
+
   it("goes straight to complete when event emission is disabled", () => {
     expect(
-      nextStep(row({ invoice_number: "1/2026", invoice_uuid: "u-1" }), { emitEvent: false }),
+      nextStep(
+        row({ invoice_number: "1/2026", invoice_uuid: "u-1", paid_confirmed_at: new Date() }),
+        { emitEvent: false },
+      ),
     ).toEqual({ step: "complete" });
   });
 
@@ -237,6 +262,7 @@ describe("nextStep", () => {
     let current = row();
     const seen: string[] = [];
     const advance: Record<string, Partial<InvoiceStateRow>> = {
+      "confirm-paid": { paid_confirmed_at: new Date(), paid_marked_at: new Date() },
       "emit-event": { event_emitted_at: new Date() },
       "fetch-invoice-number": { invoice_number: "1/07/2026" },
       "poll-ksef": { ksef_number: "K-1", ksef_status: "success" },
@@ -259,6 +285,7 @@ describe("nextStep", () => {
       "send-to-ksef",
       "poll-ksef",
       "emit-event",
+      "confirm-paid",
       "complete",
     ]);
   });

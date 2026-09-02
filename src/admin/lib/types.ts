@@ -50,6 +50,10 @@ export interface InfaktInvoiceRow {
   task_reference?: string | null;
   attempts: number;
   next_attempt_at?: string | null;
+  /** When the pipeline first asked inFakt to mark the invoice paid. */
+  paid_marked_at?: string | null;
+  /** When a read-back of the invoice showed inFakt's status as "paid". */
+  paid_confirmed_at?: string | null;
   last_error?: string | null;
   skip_reason?: string | null;
   completed_at?: string | null;

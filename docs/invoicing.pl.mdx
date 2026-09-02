@@ -88,6 +88,7 @@ Kolejny krok wynika wyłącznie z tego, które kolumny są jeszcze puste:
   invoice_number puste?                                -> fetch-invoice-number
   ksef_required i brak ksef_number?                    -> ksef_sent_at ? poll-ksef : send-to-ksef
   emitEvent i brak event_emitted_at?                   -> emit-event
+  paid_confirmed_at puste, w oknie?                    -> confirm-paid
   w przeciwnym razie                                   -> complete
 ```
 
@@ -95,6 +96,34 @@ Nie ma licznika kroków ani postępu trzymanego w pamięci i właśnie to sprawi
 awaria w dowolnej chwili jest odwracalna. Czyste reguły siedzą w
 `src/lib/invoicing/state-machine.ts`, bez bazy i bez klienta HTTP, więc własności
 odpornościowe da się przetestować jednostkowo.
+
+## Oznaczenie faktury jako zapłaconej
+
+Krok ostatni i nie przez przypadek. `POST /async/invoices/{uuid}/paid.json`
+działa asynchronicznie - HTTP 201 znaczy „zadanie przyjęte", a nie „faktura
+zapłacona" - a `status`, który z niego wynika, to jedno pole, w którym liczy się
+ostatni zapis (`draft`, `sent`, `printed`, `paid`). Nadpisze go każda późniejsza
+operacja na dokumencie, choćby zwykłe pobranie PDF. Dlatego oznaczenie jest
+odczytywane z powrotem, a nie brane na wiarę:
+
+1. Leci `markPaid`. Ten endpoint nie ma pola z kwotą, a `allow_correction` nie
+   idzie tam nigdy - zaksięgowanie korekty to decyzja właściciela konta, nie
+   pluginu.
+2. `paid_marked_at` zapisuje się raz, przy pierwszej próbie, nawet jeśli samo
+   wywołanie się nie udało. To ono otwiera okno potwierdzania i dlatego nigdy nie
+   jest nadpisywane.
+3. Faktura zostaje odczytana ponownie. `paid_confirmed_at` ustawia wyłącznie
+   `status === "paid"` - nie `paid_price` ani `left_to_pay`, bo obie te wartości
+   potrafią wyglądać źle na fakturze opłaconej w całości.
+4. Bez potwierdzenia wiersz jest odkładany i oznaczany ponownie w kolejnym tiku,
+   przez 15 minut liczonych od `paid_marked_at`. Potem i tak się domyka - z
+   ostrzeżeniem wskazującym uuid faktury i zamówienie, a widget zamówienia
+   pokazuje „brak potwierdzenia".
+
+Po ustawieniu `paid_confirmed_at` płatność nie jest już sprawdzana. Pobranie PDF
+przez człowieka przestawia status w inFakcie na „printed" i to nie może znaczyć,
+że zapłata się cofnęła. Faktura **przyjęta** (adopted) nie jest oznaczana w ogóle
+- to nie jest dokument wystawiony przez ten potok.
 
 ## Okno awarii
 
@@ -152,6 +181,7 @@ Zrzut błędów walidacji z inFaktu potrafi mieć kilka kilobajtów.
 | Harmonogram workera | `*/5 * * * *`, nadpisywany przez `INFAKT_WORKER_CRON`. Siatka bezpieczeństwa - opłacone zamówienie jest fakturowane natychmiast po `payment.captured`. |
 | Sprawdzenie, gdy inFakt albo KSeF wciąż przetwarzają | 2 minuty |
 | Sprawdzenie, gdy zamówienie nie jest jeszcze opłacone | 30 minut |
+| Potwierdzanie oznaczenia zapłaty, liczone od `paid_marked_at` | 15 minut |
 | Pierwsze ponowienie po błędzie | 10 minut, podwajane do sufitu 6 godzin |
 
 Harmonogram workera jest zmienną środowiskową, a nie opcją wtyczki, bo Medusa
