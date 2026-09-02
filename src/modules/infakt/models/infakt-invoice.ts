@@ -83,6 +83,20 @@ const InfaktInvoice = model
      * UI, so it carries field names and amounts only - never buyer data.
      */
     last_error: model.text().nullable(),
+    /**
+     * What a deferred row is waiting for, truncated to 300 characters like
+     * `last_error` and PII-free for the same reason: it is rendered in the admin
+     * UI, so it carries field names only, never their values.
+     *
+     * A defer already writes `status: "processing"`, a `next_attempt_at` and a
+     * null `last_error`, which the widget renders as "Awaiting" with no
+     * explanation - a row waiting for the buyer's address to arrive and a row
+     * waiting for inFakt to finish a task look identical. This says which.
+     *
+     * Set only on a data-wait defer and cleared the moment the row advances, so
+     * a non-null value always means "still waiting, right now".
+     */
+    defer_reason: model.text().nullable(),
     /** Earliest time the worker may pick this row up again. */
     next_attempt_at: model.dateTime().nullable(),
     /**

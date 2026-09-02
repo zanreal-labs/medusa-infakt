@@ -246,6 +246,22 @@
           "enumItems": [],
           "mappedType": "text"
         },
+        "defer_reason": {
+          "name": "defer_reason",
+          "type": "text",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "text"
+        },
         "next_attempt_at": {
           "name": "next_attempt_at",
           "type": "timestamptz",

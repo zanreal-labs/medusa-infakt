@@ -497,6 +497,12 @@ So the subscriber's only job is to create the ledger row. Every consequential de
 belongs to the worker, which is idempotent, restartable, and re-reads live state on
 every tick. A deferred order needs no second event; the next tick picks it up.
 
+One further event is subscribed and is deliberately **not** a trigger:
+`allegro.order.billing_ready`, emitted by `@zanreal/medusa-allegro` the moment a
+marketplace order's billing address is written. It never enqueues - admission stays with
+the configured trigger - it only advances a row that is already waiting for that address,
+instead of leaving it to the next cron tick.
+
 Duplicate delivery is harmless (`order_id` is unique, so a second enqueue is a no-op).
 A **missed** event is recoverable through `POST /admin/infakt/enqueue`, since Medusa's
 event delivery is at-most-once.

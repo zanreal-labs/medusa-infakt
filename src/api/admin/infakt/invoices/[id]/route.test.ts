@@ -1,6 +1,7 @@
 import type { MedusaRequest } from "@medusajs/framework/http";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InfaktApiError } from "../../../../../lib/infakt";
+import { runInvoicingNow } from "../../../../../lib/invoicing/run";
 import { mockResponse } from "../../__tests__/mock-response";
 import { POST } from "./route";
 
@@ -10,6 +11,9 @@ const { run } = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock("../../../../../workflows/apply-invoice-action", () => ({
   applyInvoiceActionWorkflow: () => ({ run }),
 }));
+// Same boundary for the runner: an operator clicking Retry must not then wait
+// for a cron tick.
+vi.mock("../../../../../lib/invoicing/run", () => ({ runInvoicingNow: vi.fn() }));
 
 const service = (overrides: Record<string, unknown> = {}) => ({
   getApiClient: vi.fn().mockResolvedValue({
@@ -30,7 +34,9 @@ const request = (svc: unknown, body: Record<string, unknown>): MedusaRequest =>
 
 beforeEach(() => {
   run.mockReset();
-  run.mockResolvedValue({ result: { applied: true, note: "queued for the next worker tick" } });
+  run.mockResolvedValue({ result: { applied: true, note: "queued and picked up now" } });
+  vi.mocked(runInvoicingNow).mockReset();
+  vi.mocked(runInvoicingNow).mockResolvedValue(undefined);
 });
 
 describe("POST /admin/infakt/invoices/:id", () => {
@@ -60,8 +66,37 @@ describe("POST /admin/infakt/invoices/:id", () => {
     });
     expect(res.json).toHaveBeenCalledWith({
       invoice: { id: "inv_1", status: "processing" },
-      note: "queued for the next worker tick",
+      note: "queued and picked up now",
     });
+  });
+
+  it("runs the pipeline for the row it just un-parked", async () => {
+    const svc = service({
+      listInfaktInvoices: vi
+        .fn()
+        .mockResolvedValue([{ id: "inv_1", order_id: "order_1", status: "processing" }]),
+    });
+    await POST(request(svc, { action: "retry" }), mockResponse());
+    expect(runInvoicingNow).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ orderId: "order_1" }),
+    );
+  });
+
+  it("starts nothing for a terminal row - skip is a decision not to issue", async () => {
+    const svc = service({
+      listInfaktInvoices: vi
+        .fn()
+        .mockResolvedValue([{ id: "inv_1", order_id: "order_1", status: "skipped" }]),
+    });
+    await POST(request(svc, { action: "skip", reason: "test order" }), mockResponse());
+    expect(runInvoicingNow).not.toHaveBeenCalled();
+  });
+
+  it("starts nothing when the action was refused", async () => {
+    run.mockResolvedValue({ result: { applied: false, refusal: "refusing to retry: ..." } });
+    await POST(request(service(), { action: "retry" }), mockResponse());
+    expect(runInvoicingNow).not.toHaveBeenCalled();
   });
 
   it("answers 409 for a refused action, with the operator-facing reason", async () => {
