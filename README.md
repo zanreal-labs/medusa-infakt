@@ -81,7 +81,18 @@ obligation applies to your business, and that your invoices are correct, remains
 
 ## Install
 
-This package is not on npm yet. It installs as a git dependency, pinned to a commit:
+`@zanreal/medusa-infakt` is on npm as `0.1.0`:
+
+```bash
+npm install @zanreal/medusa-infakt
+```
+
+That resolves to a prebuilt tarball - the published package already contains the
+`.medusa/server` output its `exports` point at, so nothing needs to compile on install.
+
+`main` keeps moving after a release ships (see [Releasing](#releasing)), so if you need a fix or
+feature that has landed on `main` but not yet been released, install it as a git dependency
+instead, pinned to a commit:
 
 ```jsonc
 // package.json
@@ -92,13 +103,13 @@ This package is not on npm yet. It installs as a git dependency, pinned to a com
 }
 ```
 
-Pin to the commit you tested against. There is no published tag yet, so `#main` would move under
-you on the next push to the repository.
+Pin to the commit you tested against. `#main` would move under you on the next push to the
+repository.
 
-The package compiles itself on install - `prepare` runs `medusa plugin:build`, which turns the
-checked-out source into the `.medusa/server` output its `exports` point at. pnpm 10 and newer
-refuse to run that script for a dependency they do not already trust, so a fresh install needs it
-allowed once, in your project's `pnpm-workspace.yaml`:
+Installed this way, the package compiles itself on install - `prepare` runs `medusa
+plugin:build`, which turns the checked-out source into the `.medusa/server` output its `exports`
+point at. pnpm 10 and newer refuse to run that script for a dependency they do not already trust,
+so a fresh install needs it allowed once, in your project's `pnpm-workspace.yaml`:
 
 ```yaml
 # pnpm-workspace.yaml
@@ -1238,9 +1249,11 @@ npm carrying no provenance, and a published version cannot be replaced
 afterwards, only deprecated. `publishConfig.provenance` in `package.json` makes
 that local publish fail rather than quietly succeed without it.
 
-Nothing has been published yet. `@zanreal/medusa-infakt` is not on the registry,
-so the pinned git dependency in [Install](#install) is still the only way to
-consume it; the first GitHub Release is what changes that.
+`@zanreal/medusa-infakt@0.1.0` is on the registry; see [Install](#install) for how to consume it.
+`package.json` stays at the last released version until someone bumps it, so `main` can sit ahead
+of what npm resolves to - the pinned git dependency in [Install](#install) is the only way to
+consume whatever has landed since. Closing that gap, and choosing the version it bumps to, is the
+maintainer's call.
 
 To cut a release:
 

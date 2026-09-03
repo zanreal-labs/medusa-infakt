@@ -67,8 +67,17 @@ between.
 
 ## Install
 
-This package is not on npm yet. It installs as a git dependency, pinned to a
-commit:
+`@zanreal/medusa-infakt` is on npm as `0.1.0`:
+
+```bash
+npm install @zanreal/medusa-infakt
+```
+
+That resolves to a prebuilt tarball - the published package already contains the
+`.medusa/server` output its `exports` point at, so nothing needs to compile on install.
+
+`main` keeps moving after a release ships, so if you need a fix or feature that has landed on
+`main` but not yet been released, install it as a git dependency instead, pinned to a commit:
 
 ```jsonc title="package.json"
 {
@@ -78,14 +87,13 @@ commit:
 }
 ```
 
-Pin the commit you tested against. There is no published tag, so `#main` would
-move under you on the next push; a pinned commit means the same thing tomorrow
-that it means today.
+Pin the commit you tested against. `#main` would move under you on the next push; a pinned
+commit means the same thing tomorrow that it means today.
 
-The package builds itself on install: `prepare` runs `medusa plugin:build`,
-which turns the checked-out source into the `.medusa/server` output its
-`exports` point at. pnpm 10 and newer will not run that script for a dependency
-they do not already trust, so allow it once in your own workspace file:
+Installed this way, the package builds itself on install: `prepare` runs `medusa plugin:build`,
+which turns the checked-out source into the `.medusa/server` output its `exports` point at. pnpm
+10 and newer will not run that script for a dependency they do not already trust, so allow it
+once in your own workspace file:
 
 ```yaml title="pnpm-workspace.yaml"
 allowBuilds:
