@@ -211,6 +211,28 @@ describe("resolveInfaktOptions: settingsEncryptionKey", () => {
   });
 });
 
+describe("resolveInfaktOptions: webhookSecret", () => {
+  it("resolves to null when unset, which is what makes the KSeF webhook answer 401", () => {
+    expect(resolveInfaktOptions(valid()).webhookSecret).toBeNull();
+  });
+
+  it("trims and keeps a configured secret", () => {
+    expect(resolveInfaktOptions(valid({ webhookSecret: "  from-the-panel  " })).webhookSecret).toBe(
+      "from-the-panel",
+    );
+  });
+
+  it("reads an unset env var (a blank string) as no webhook configured", () => {
+    expect(resolveInfaktOptions(valid({ webhookSecret: "" })).webhookSecret).toBeNull();
+  });
+
+  it("rejects a non-string rather than coercing one", () => {
+    expect(() =>
+      resolveInfaktOptions(valid({ webhookSecret: 12_345 as unknown as string })),
+    ).toThrow(/webhookSecret/u);
+  });
+});
+
 describe("toPublicInfaktOptions", () => {
   it("never carries the api key, the extractor or the predicate", () => {
     const publicOptions = toPublicInfaktOptions(
@@ -220,6 +242,14 @@ describe("toPublicInfaktOptions", () => {
     expect(publicOptions).not.toHaveProperty("nipExtractor");
     expect(publicOptions).not.toHaveProperty("ksefDecide");
     expect(JSON.stringify(publicOptions)).not.toContain("test-key");
+  });
+
+  it("never carries the webhook secret either - it is the second credential here", () => {
+    const publicOptions = toPublicInfaktOptions(
+      resolveInfaktOptions(valid({ webhookSecret: "from-the-panel" })),
+    );
+    expect(publicOptions).not.toHaveProperty("webhookSecret");
+    expect(JSON.stringify(publicOptions)).not.toContain("from-the-panel");
   });
 
   it("reports a custom predicate as a boolean flag", () => {

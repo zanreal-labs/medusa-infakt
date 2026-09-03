@@ -193,6 +193,25 @@ export interface InfaktPluginOptions {
    * message naming this option. Read it from an env var, exactly like `apiKey`.
    */
   settingsEncryptionKey?: string;
+  /**
+   * The secret inFakt signs its webhook deliveries with, and the enable switch
+   * for `POST /hooks/infakt/ksef`.
+   *
+   * inFakt generates it when a webhook is created in the panel (Ustawienia ->
+   * Inne opcje -> Webhooki) and shows it in that webhook's details; it is not a
+   * string this plugin or an operator chooses. Every delivery carries
+   * `X-Infakt-Signature`, the hex HMAC-SHA256 of the raw request body under this
+   * key, and inFakt's own documentation says an endpoint that cannot verify a
+   * signature must answer 401.
+   *
+   * Leave it unset and the route still exists but answers 401 to everything,
+   * including a delivery carrying a perfectly good signature. That direction is
+   * deliberate: an unauthenticated route that advances a legally significant
+   * document on anyone's say-so is worse than a webhook nobody has wired up yet,
+   * and the KSeF poll files every invoice meanwhile either way. Read it from an
+   * env var, exactly like `apiKey`.
+   */
+  webhookSecret?: string;
 }
 
 /** Options after defaults and validation. Every field is present. */
@@ -216,6 +235,8 @@ export interface ResolvedInfaktOptions {
   timeoutMs: number;
   /** null when unset: no admin-set `apiKey` override can be persisted. */
   settingsEncryptionKey: string | null;
+  /** null when unset: the KSeF webhook route answers 401 to every request. */
+  webhookSecret: string | null;
   /** False keeps every foreign order skipped, exactly as before this feature. */
   crossBorderEnabled: boolean;
   /** Extra currencies invoiced when `crossBorderEnabled`. Never includes `currency`. */
@@ -481,6 +502,20 @@ export const resolveInfaktOptions = (
   }
   const settingsEncryptionKey = settingsEncryptionKeyRaw ? settingsEncryptionKeyRaw : null;
 
+  // Same blank-is-absent rule, and the same reason to reject a blank one loudly:
+  // `webhookSecret: process.env.INFAKT_WEBHOOK_SECRET` with the variable unset in
+  // the shell yields `""`, and treating that as "no webhook configured" is right,
+  // but treating a deliberate `"   "` as one hides a typo behind a 401 that looks
+  // exactly like inFakt signing with a rotated key.
+  const webhookSecretRaw =
+    typeof options.webhookSecret === "string" ? options.webhookSecret.trim() : "";
+  if (options.webhookSecret !== undefined && typeof options.webhookSecret !== "string") {
+    throw optionError(
+      `plugin option \`webhookSecret\` must be a string (got ${typeof options.webhookSecret}).`,
+    );
+  }
+  const webhookSecret = webhookSecretRaw ? webhookSecretRaw : null;
+
   const crossBorderEnabled = options.crossBorder?.enabled === true;
   const crossBorderCurrencies = normalizeCurrencyList(options.crossBorder?.currencies, currency);
 
@@ -568,5 +603,6 @@ export const resolveInfaktOptions = (
     viesBaseUrl: options.crossBorder?.viesBaseUrl?.trim() || DEFAULT_VIES_BASE_URL,
     viesFallback,
     viesTimeoutMs,
+    webhookSecret,
   };
 };

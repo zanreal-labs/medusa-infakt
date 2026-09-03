@@ -31,6 +31,7 @@ follows from that.
 - [Adopting invoices that already exist in inFakt](#adopting-invoices-that-already-exist-in-infakt)
 - [Where the buyer's NIP comes from](#where-the-buyers-nip-comes-from)
 - [KSeF](#ksef)
+  - [The KSeF webhook](#the-ksef-webhook)
 - [Operator runbook: needs_review](#operator-runbook-needs_review)
 - [Cross-border VAT](#cross-border-vat)
 - [Cross-plugin event](#cross-plugin-event)
@@ -189,6 +190,7 @@ module the plugin registers (there is one: `infakt`).
 | `emitIssuedEvent`       | `boolean`                              | `true`               | Emit `infakt.invoice.issued` once an invoice is issued.                                                                                        |
 | `timeoutMs`             | `number`                               | `60000`              | Per-request timeout for inFakt calls.                                                                                                          |
 | `settingsEncryptionKey` | `string`                               | -                    | Encrypts an admin-set `apiKey` override at rest. Required before one can be saved from Settings -> inFakt; see below. Read it from an env var. |
+| `webhookSecret`         | `string`                               | -                    | The secret inFakt generated for its webhook. **The enable switch for `POST /hooks/infakt/ksef`** - unset, that route answers 401 to everything. Read it from an env var. See [The KSeF webhook](#the-ksef-webhook). |
 
 ## Cross-border VAT
 
@@ -481,6 +483,8 @@ payment.captured  ->  subscriber  ->  InfaktInvoice row (status: pending)
                         ksef_sent_at       ->  POST /ksef2/documents/{uuid}/send.json (when required)
                                              |
                         ksef_number        ->  poll until "success"
+                                             |     (a configured webhook only
+                                             |      wakes this poll sooner)
                                              |
                         event_emitted_at   ->  emit infakt.invoice.issued
                                              |
@@ -870,6 +874,115 @@ inactive, so fixing it in inFakt takes effect on the next tick. **Re-check KSeF*
 A failed _check_ is recorded as an error, never as `active: false`. "We could not reach
 inFakt" and "your integration has lapsed" call for completely different responses.
 
+### The KSeF webhook
+
+inFakt's KSeF documentation asks for a webhook rather than repeated `status.json` reads
+(_"Zachęcamy do skonfigurowania webhooka, który poinformuje o zmianie statusu
+przetwarzania na końcowy. Ograniczy to ilość zbędnych zapytań."_). Filing a B2B invoice
+has been mandatory since April 2026, which makes it the one step in this pipeline with a
+statutory deadline behind it, so the status should arrive when inFakt has it.
+
+`POST /hooks/infakt/ksef` is that endpoint. It is **optional**: leave `webhookSecret`
+unset and the plugin behaves exactly as it did before this existed - the KSeF poll rides
+each document to a terminal state inside the run, and the cron sweeps up whatever it
+could not finish. Wiring the webhook does not replace either of them.
+
+**The webhook is a nudge, never a fact.** Nothing is read out of the payload except which
+invoice to look at. The route then re-reads the status from
+`GET /ksef2/documents/{uuid}/status.json` through the same `poll-ksef` step the cron runs,
+so the persisted columns advance through their normal code and remain the only source of
+truth. A forged or replayed delivery, if one ever got past the signature, can at worst
+cause a status read - it cannot write a KSeF number, park an invoice, or mark an unfiled
+document as filed.
+
+#### What inFakt sends
+
+Two events concern this plugin, out of the seven in inFakt's table: `send_to_ksef_success`
+and `send_to_ksef_error`. Everything else is answered 200 and ignored.
+
+```json
+{
+  "event": {
+    "name": "send_to_ksef_error",
+    "uuid": "432cc5fc-f7ca-4afa-9420-7d6410fc0940",
+    "created_at": "2023-10-02T11:30:30.656+02:00",
+    "retry_counter": 0
+  },
+  "resource": {
+    "invoice_uuid": "ee2484ce-052c-495a-9ce1-5bd3ae8314aa",
+    "status": "error",
+    "ksef_number": null,
+    "status_description": "Wystąpił problem podczas otwarcia sesji."
+  }
+}
+```
+
+A webhook configured with **"bez poufnych informacji"** reduces `resource` to
+`{ "uuid": "..." }`. That mode works here too, and is arguably the better one to pick:
+the identifier is all this endpoint uses.
+
+#### Signing
+
+Every delivery carries `X-Infakt-Signature`, the **hex HMAC-SHA256 of the raw request
+body** under the secret inFakt generates per webhook and shows in its details in the
+panel. The route verifies it in constant time against the preserved raw bytes - not
+against re-serialised JSON, which would be different bytes - and answers **401** to a
+missing, malformed or wrong one, which is what inFakt's documentation says a failed
+verification must answer.
+
+There is no timestamp and no replay window in inFakt's scheme, so the signature proves
+authenticity and nothing more. That is survivable only because of the "nudge, never a
+fact" property above; do not weaken it.
+
+With no `webhookSecret` configured the route answers 401 to **every** request, including
+one carrying a valid signature. An unauthenticated endpoint that advances a legally
+significant document on anyone's say-so is worse than a webhook nobody has wired up yet.
+
+#### Registering it
+
+There is **no API for this** - webhooks are created by hand, per account, in the panel.
+
+1. Go to **Ustawienia -> Inne opcje -> Webhooki** (`https://app.infakt.pl/app/webhooki`),
+   press **Dodaj nowy webhook**.
+2. **Adres URL**: the public URL of `POST /hooks/infakt/ksef` on your deployment.
+3. **Zdarzenia**: tick `send_to_ksef_success` and `send_to_ksef_error`.
+4. **Zawartość danych**: either mode works.
+5. Copy the generated secret into the `webhookSecret` option and restart, **before** the
+   next step - the activation challenge is signed too, and an unconfigured route answers
+   it 401.
+6. Press **Zweryfikuj**. inFakt POSTs a random `verification_code`, this route echoes it
+   back, and the webhook moves from _Do weryfikacji_ to _Aktywny_.
+
+Two operational facts worth knowing. inFakt **retries a delivery until it is answered 200
+or 201**, emails after six failures and switches the webhook off automatically after ten -
+which is why this route answers 200 to everything it cannot act on, rather than spending
+that budget on a condition no retry can change. And inFakt publishes the addresses its API
+and webhooks call from, so an ingress can allowlist them:
+
+```
+18.195.224.145  35.157.20.95    18.153.130.220  18.158.11.58   18.158.35.194
+18.159.228.63   18.195.110.70   3.121.46.57     3.124.100.165  3.125.243.218
+3.126.125.137   3.67.214.209    3.79.196.143    3.79.223.93    52.28.116.250
+```
+
+The feature is marked beta by inFakt, and their docs contradict themselves on the
+auto-disable threshold (ten failures in one place, eleven in another). Treat the poll as
+load-bearing, not as legacy.
+
+#### Why `/hooks` and why it is not a hole in `/admin`
+
+`/hooks` is a custom prefix Medusa applies no authentication to, and it is the prefix a
+Medusa deployment typically publishes when it publishes anything at all - so this route
+needs no ingress change where `/hooks` is already public, and `/admin` is untouched. This
+is an unauthenticated route **of its own**, with its own credential and no authority: it
+is not `AUTHENTICATE = false` on anything, and no admin matcher was widened. See the
+comment in [`src/api/middlewares.ts`](./src/api/middlewares.ts), which registers exactly
+one thing for it - `bodyParser.preserveRawBody`, without which the HMAC cannot be checked
+at all.
+
+If your deployment does not publish `/hooks`, publish that one path, ideally locked to
+`POST` and to the addresses above. Do not publish `/admin` to get it.
+
 ## Operator runbook: needs_review
 
 A `needs_review` row raises a Medusa admin notification that deep-links to the order.
@@ -954,7 +1067,10 @@ invoice looking broken.
 
 ## Admin API
 
-All routes live under `/admin` and use Medusa's default admin authentication.
+Every route in this table lives under `/admin` and uses Medusa's default admin
+authentication. The plugin adds exactly one route outside it -
+`POST /hooks/infakt/ksef`, which is unauthenticated by design and verifies an inFakt
+HMAC signature instead; see [The KSeF webhook](#the-ksef-webhook).
 
 | Route                        | Method    | Purpose                                                                 |
 | ---------------------------- | --------- | ----------------------------------------------------------------------- |
@@ -1104,8 +1220,6 @@ for.
   was already invoiced goes to `needs_review` and a human issues the correction in inFakt.
   inFakt has an API for it; the hard part is deciding what a correction should say, which
   is a business rule and not obviously ours to guess.
-- **A webhook instead of polling.** inFakt's KSeF docs recommend a webhook for the final
-  processing status, which would remove most of the `status.json` polling.
 - **Integration tests against a live Postgres** via `@medusajs/test-utils`
   (`moduleIntegrationTestRunner`) for the one property unit tests cannot assert: that two
   concurrent claims really do serialize on the row lock.
