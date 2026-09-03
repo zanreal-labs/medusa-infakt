@@ -1,0 +1,149 @@
+---
+title: Uzgadnianie rozliczeń
+description: "Czy inFakt zgadza się, że te zamówienia zostały opłacone: dlaczego jedynym trwałym sygnałem jest paid_date, pięć kodów rozbieżności, przesuwne okno 90 dni i dlaczego nic nie naprawia się samo."
+---
+
+Wystawienie faktury i odnotowanie, że została opłacona, to dwie różne sprawy w
+dwóch różnych cyklach. Pierwsza ma termin ustawowy, druga to księgowość, którą
+można poprawić godzinę później. Ten mechanizm jest tą drugą i działa w całości
+poza [potokiem fakturowania](./invoicing.pl.mdx) - własne zadanie, własne
+kolumny, własne zdarzenia.
+
+Ten rozdział nie jest kwestią estetyki. Wcześniejsza wersja wcisnęła rozliczanie
+do potoku wystawiania jako pętlę ponowień i skutek był taki, że wystawione,
+wysłane do KSeF faktury nie mogły się domknąć przez kwadrans.
+
+## Sygnałem jest `paid_date` i nic poza nim
+
+`status` w inFakcie to jedno pole typu „ostatni zapis wygrywa" (`draft`, `sent`,
+`printed`, `paid`), które nadpisuje **każda** późniejsza operacja na dokumencie -
+w tym zwykłe pobranie PDF, bo tak inFakt odnotowuje, że dokument opuścił system.
+
+> Produkcyjna faktura `2/09/2026`: oznaczona jako zapłacona o 12:40:03. Trzy
+> sekundy później nasz własny załącznik do Allegro pobrał PDF i status pokazywał
+> `sent`. `paid_date` pozostało nietknięte.
+
+Czytana przez `status` ta faktura na zawsze raportuje się jako nieopłacona.
+Czytana przez `paid_date` - zapisywane przez endpoint oznaczania i nietykane
+przez późniejsze operacje - raportuje się jako to, czym jest.
+
+Kwoty nie są lepsze. Faktura `9/08/2026` ma równocześnie `status: "paid"` i
+`paid_price: 0`. Zarówno `paid_price`, jak i `left_to_pay` są zapisywane jako
+materiał dowodowy i **żadne z nich nigdy nie rozstrzyga**.
+
+## Tylko w jedną stronę
+
+Źródłem prawdy o płatności jest Medusa, inFakt jest po stronie odbiorczej.
+Uzgadnianie czyta oba systemy, zapisuje, co zastało, i nie zapisuje stanu
+płatności do żadnego z nich. Przeniesienie „ktoś odhaczył zapłatę w panelu
+inFaktu" z powrotem do zamówienia zrobiłoby z panelu księgowego bramkę płatności.
+
+Nie pobiera też PDF-u. To właśnie ten endpoint psuje `status`, więc uzgadnianie,
+które by go używało, niszczyłoby pole, na którego zawodność jest odpowiedzią.
+
+## Cztery kolumny
+
+| Kolumna | Znaczenie |
+| --- | --- |
+| `settled_at` | `paid_date` z inFaktu jako znacznik czasu. Puste znaczy „nierozliczone wedle ostatniego odczytu" |
+| `settlement_checked_at` | Kiedy ten wiersz był ostatnio czytany z inFaktu. Puste znaczy, że nikt nie patrzył |
+| `settlement_drift` | Na czym polega rozbieżność, albo puste, gdy oba systemy się zgadzają |
+| `settlement_paid_minor` | `paid_price` z inFaktu. Wyłącznie dowód, nigdy podstawa decyzji |
+
+Wszystkie cztery są nullowalne, bez wartości domyślnej i **bez backfillu**. Na
+istniejącym sklepie każdy wiersz startuje z pustymi wartościami, co czyta się jako
+„jeszcze niesprawdzony" - nic nie zostaje zinterpretowane na nowo, a uzgadnianie
+wypełnia je własnym tempem, od najdawniej niesprawdzanych.
+
+## Pięć kodów rozbieżności
+
+| Kod | Co znaczy | Do naprawy maszynowo? |
+| --- | --- | --- |
+| `unsettled` | Medusa ma pobraną całą kwotę, inFakt nie ma `paid_date` | **Jedyny kandydat** |
+| `refunded_but_settled` | Pieniądze wróciły, a inFakt wciąż ma dokument rozliczony | Nie - tylko raport |
+| `settled_without_capture` | inFakt ma rozliczone, Medusa nie pobrała nic | Nie - tylko raport |
+| `amount_mismatch` | inFakt ma rozliczone, Medusa pobrała część kwoty | Nie - tylko raport |
+| `unreadable` | Faktury albo zamówienia nie dało się odczytać na tyle, żeby porównać | Nie |
+
+`amount_mismatch` wynika z **pobrań**, nigdy z `paid_price` inFaktu - patrz
+faktura `9/08/2026` wyżej.
+
+Zwrot na rozliczonej fakturze jest raportowany i nigdy cofany. inFakt nie ma
+„odznacz", a właściwym instrumentem jest faktura korygująca, której ta wtyczka nie
+wystawia z własnej inicjatywy.
+
+## Nic nie naprawia się samo
+
+Nawet `unsettled`. Ta wersja czyta, porównuje i raportuje; raport wskazuje
+wiersze, których naprawa *by* dotknęła (`auto_fixable`), żeby dało się ocenić
+zasięg, zanim cokolwiek zostanie uzbrojone.
+
+**Faktury przejęte (adopted) są raportowane i nigdy naprawiane, niezależnie od
+kodu.** Przejęta faktura istniała, zanim powstał jej wiersz w rejestrze, jej
+księgowanie płatności należy do tego, kto ją wystawił, a wpisanie na niej daty
+zapłaty to zmiana w cudzym zapisie księgowym. W środowisku, dla którego to
+projektowano, 25 z 30 wierszy jest przejętych - ta odmowa to większość tabeli, a
+nie przypadek brzegowy.
+
+## Kiedy działa
+
+- **Na zdarzenie.** `payment.captured`, `payment.refunded` i `order.canceled`
+  uzgadniają to jedno zamówienie, którego dotyczą, sekundy po zdarzeniu. Zwrot
+  jest jedynym sposobem, w jaki rozliczona faktura staje się nieaktualna po
+  fakcie, a nic innego w tej wtyczce zwrotu nie zauważa.
+- **Co godzinę, o `17 * * * *`** (`INFAKT_SETTLEMENT_CRON`), jako siatka
+  bezpieczeństwa - dla oznaczenia, które inFakt przyjął i zgubił, dla zapłaty
+  odhaczonej ręcznie w panelu, dla zdarzenia, które nigdy nie dotarło, i dla
+  każdego wiersza sprzed istnienia tego mechanizmu.
+
+Wiersz, który się rozliczył i zgadza, **nie jest czytany ponownie**: `paid_date`
+się nie cofa. Wiersz, który się nie zgadza, jest czytany najwyżej co 6 godzin. To
+właśnie trzyma koszt w dziesiątkach zapytań dziennie, a nie w setkach.
+
+Zadanie nie bierze blokady fakturowania. Nie dzieli żadnej kolumny z maszyną
+stanów wystawiania, więc nie jest w stanie zatrzymać faktury, spalić budżetu
+ponowień ani trzymać blokady, za którą czekałby dokument prawny.
+
+## Okno dziewięćdziesięciu dni
+
+Siatka bezpieczeństwa domyślnie patrzy 90 dni wstecz. Faktura, której rozliczenie
+nigdy się nie uzgodniło, jest problemem operacyjnym do momentu, aż ktoś to
+zauważy - czyli tygodnie, nie miesiące - a okno bez końca oznacza przemielanie
+całej historii faktur sklepu, w kółko, po to, żeby nic nie znaleźć.
+
+Pełny przemiał jest dostępny na żądanie i taki właśnie ma być kształt: rzadko, na
+wyraźną prośbę i pod obserwacją.
+
+## Raport
+
+```http
+GET  /admin/infakt/settlement?days=90&full=true
+POST /admin/infakt/settlement  { days?, full?, order_ids? }
+```
+
+`GET` czyta rejestr. Nie woła niczego na zewnątrz, kosztuje jedno zapytanie i
+można go bezpiecznie odpytywać albo trzymać otwartego w karcie.
+
+`POST` **czyta inFakt na nowo** dla wierszy w zakresie, aktualizuje te same cztery
+kolumny i odpowiada odświeżonym raportem. To odświeżenie, nie działanie: nigdy nie
+oznacza faktury jako zapłaconej i nie dotyka maszyny stanów wystawiania.
+`apply: true` kończy się błędem 400, a nie zignorowaniem - automatyczna naprawa
+nie istnieje, a pytający o nią nie może zostać z przekonaniem, że rozbieżność
+została poprawiona.
+
+W odróżnieniu od tras fakturowania żadna z tych metod nie patrzy na przełącznik
+pauzy: odczyt raportu niczego nie wystawia, a sklep porządkujący księgi bardzo
+prawdopodobnie ma fakturowanie zapauzowane.
+
+## Co obserwować
+
+`GET /admin/infakt` zwraca sekcję `settlement` obok liczników statusów, bez
+dodatkowego zapytania:
+
+| Pole | Dlaczego jest ważne |
+| --- | --- |
+| `drift.unsettled` | Faktury wystawione przez tę wtyczkę, których inFakt nie ma za rozliczone |
+| `auto_fixable` | Podzbiór, którego dotknęłaby przyszła naprawa: `unsettled`, nieprzejęte |
+| `adopted_drift` | Rozbieżności na fakturach przejętych - zawsze tylko raport |
+| `never_checked` | Zafakturowane wiersze, których nikt jeszcze nie uzgadniał |
+| `oldest_checked_age_seconds` | **To do alertu.** Zatrzymane uzgadnianie wygląda dokładnie jak rozliczony sklep, dopóki nikt nie mierzy wieku sprawdzenia |

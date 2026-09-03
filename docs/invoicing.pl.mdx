@@ -88,7 +88,7 @@ Kolejny krok wynika wyłącznie z tego, które kolumny są jeszcze puste:
   invoice_number puste?                                -> fetch-invoice-number
   ksef_required i brak ksef_number?                    -> ksef_sent_at ? poll-ksef : send-to-ksef
   emitEvent i brak event_emitted_at?                   -> emit-event
-  paid_confirmed_at puste, w oknie?                    -> confirm-paid
+  nieoznaczona, nieprzyjęta, niepotwierdzona?          -> confirm-paid
   w przeciwnym razie                                   -> complete
 ```
 
@@ -110,15 +110,27 @@ odczytywane z powrotem, a nie brane na wiarę:
    idzie tam nigdy - zaksięgowanie korekty to decyzja właściciela konta, nie
    pluginu.
 2. `paid_marked_at` zapisuje się raz, przy pierwszej próbie, nawet jeśli samo
-   wywołanie się nie udało. To ono otwiera okno potwierdzania i dlatego nigdy nie
-   jest nadpisywane.
-3. Faktura zostaje odczytana ponownie. `paid_confirmed_at` ustawia wyłącznie
-   `status === "paid"` - nie `paid_price` ani `left_to_pay`, bo obie te wartości
-   potrafią wyglądać źle na fakturze opłaconej w całości.
-4. Bez potwierdzenia wiersz jest odkładany i oznaczany ponownie w kolejnym tiku,
-   przez 15 minut liczonych od `paid_marked_at`. Potem i tak się domyka - z
-   ostrzeżeniem wskazującym uuid faktury i zamówienie, a widget zamówienia
-   pokazuje „brak potwierdzenia".
+   wywołanie się nie udało. To ono pilnuje, żeby krok nie wykonał się drugi raz, i
+   dlatego nigdy nie jest nadpisywane.
+3. Faktura zostaje odczytana ponownie, a czytane jest **`paid_date`**. To pole
+   zapisuje endpoint oznaczania i przeżywa każdą późniejszą operację na
+   dokumencie - czego `status` właśnie nie robi. `paid_date` ustawia
+   `paid_confirmed_at` oraz `settled_at`.
+4. Bez potwierdzenia wiersz **i tak się domyka** - z ostrzeżeniem wskazującym
+   uuid faktury i zamówienie, a widget zamówienia pokazuje „brak potwierdzenia".
+   Nie ma tu żadnej pętli ponowień: cokolwiek nadpisało oznaczenie za pierwszym
+   razem, nadpisze je i za drugim, więc ponawianie mogłoby tylko wstrzymać
+   domknięcie wystawionej i wysłanej do KSeF faktury dla sygnału, który i tak
+   nigdy się nie ustabilizuje. Rozliczeniem zajmuje się dalej
+   [uzgadnianie rozliczeń](./settlement.pl.mdx), we własnym cyklu.
+
+`status` świadomie nie jest tu sygnałem. Produkcyjna faktura `2/09/2026` została
+oznaczona o 12:40:03 i odczytana trzy sekundy później jako `status: "sent"` - to
+nasz własny załącznik do Allegro pobrał PDF, a pobranie PDF przestawia status.
+Jej `paid_date` pozostało nietknięte. Czytana przez `status` faktura rozliczona
+co do grosza raportuje się jako niepotwierdzona; czytana przez `paid_date` -
+jako to, czym jest. `paid_price` nie jest lepsze w drugą stronę: faktura
+`9/08/2026` ma równocześnie `status: "paid"` i `paid_price: 0`.
 
 Po ustawieniu `paid_confirmed_at` płatność nie jest już sprawdzana. Pobranie PDF
 przez człowieka przestawia status w inFakcie na „printed" i to nie może znaczyć,
@@ -208,7 +220,9 @@ Zrzut błędów walidacji z inFaktu potrafi mieć kilka kilobajtów.
 | Dojeżdżanie KSeF do stanu końcowego w jednym przebiegu | 5 s, podwajane do sufitu 30 s, łącznie do 150 s na cały przebieg |
 | Oczekiwanie na dane nabywcy, liczone od `created_at` | 60 minut |
 | Sprawdzenie, gdy zamówienie nie jest jeszcze opłacone | 30 minut |
-| Potwierdzanie oznaczenia zapłaty, liczone od `paid_marked_at` | 15 minut |
+| Potwierdzanie oznaczenia zapłaty | Jeden odczyt zwrotny, w tym samym przebiegu. Bez ponowień - patrz wyżej |
+| Uzgadnianie rozliczeń | `17 * * * *`, nadpisywane przez `INFAKT_SETTLEMENT_CRON`. Osobne zadanie na osobnych kolumnach |
+| Ponowny odczyt faktury, której rozliczenie wciąż się nie zgadza | 6 godzin |
 | Pierwsze ponowienie po błędzie | 10 minut, podwajane do sufitu 6 godzin |
 
 Harmonogram workera jest zmienną środowiskową, a nie opcją wtyczki, bo Medusa

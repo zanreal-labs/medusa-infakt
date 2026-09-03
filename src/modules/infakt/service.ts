@@ -625,6 +625,94 @@ export default class InfaktModuleService extends MedusaService({
   }
 
   /**
+   * The rows the settlement reconciliation should read from inFakt now.
+   *
+   * Raw SQL for the same reason `listDueInvoices` is: the predicate has to run in
+   * the database, or a store with more invoices than the batch size would have
+   * its oldest unchecked rows starved behind a page of freshly checked ones -
+   * which is not a slowdown, it is a discrepancy nobody ever sees.
+   *
+   * Each clause is load-bearing:
+   *
+   *  - `invoice_uuid is not null` - there is nothing to read otherwise.
+   *  - `status in ('done', 'needs_review')` - a row still moving through the
+   *    pipeline has its own step for this. Reconciling one mid-flight would read
+   *    a document the pipeline is about to touch and report a race as a drift.
+   *  - `settled_at is null or settlement_drift is not null` - a settled row that
+   *    agrees is DONE, permanently. `paid_date` does not come undone, so re-reading
+   *    it forever would spend inFakt's rate limit to re-learn a fact. A row that
+   *    disagrees keeps being re-read, because that is the one an operator is
+   *    working on.
+   *  - `settlement_checked_at` older than the re-check window - what keeps an
+   *    hourly job from re-reading every unsettled invoice every hour.
+   *  - `created_at` inside the sliding window, unless the caller asked for a full
+   *    pass. See `settlementWindowStart` for why the window is bounded at all.
+   *
+   * `nulls first` is explicit: Postgres sorts nulls LAST on an ascending order,
+   * which would put the rows nobody has ever checked at the very back of the
+   * queue - exactly backwards.
+   */
+  async listSettlementCandidates(input: {
+    limit: number;
+    checkedBefore: Date;
+    createdAfter?: Date | null;
+  }): Promise<Record<string, unknown>[]> {
+    const windowed = input.createdAfter ? `and "created_at" >= ?` : "";
+    const bindings: unknown[] = [input.checkedBefore];
+    if (input.createdAfter) {
+      bindings.push(input.createdAfter);
+    }
+    bindings.push(input.limit);
+
+    return rawRows<Record<string, unknown>>(
+      await this.getRawSql().raw(
+        `select * from "${INVOICE_TABLE}"
+          where "deleted_at" is null
+            and "invoice_uuid" is not null
+            and "status" in ('done', 'needs_review')
+            and ("settled_at" is null or "settlement_drift" is not null)
+            and ("settlement_checked_at" is null or "settlement_checked_at" <= ?)
+            ${windowed}
+          order by "settlement_checked_at" asc nulls first, "created_at" asc
+          limit ?`,
+        bindings,
+      ),
+    );
+  }
+
+  /**
+   * Every invoiced row in the window, for the settlement REPORT.
+   *
+   * Reads what the reconciliation has already persisted and calls nothing
+   * external - the report is a view of the ledger, not a second reconciliation.
+   * That is what makes it safe to refresh in a browser: it costs one query and no
+   * inFakt requests.
+   */
+  async listSettlementLedger(input: {
+    limit: number;
+    createdAfter?: Date | null;
+  }): Promise<Record<string, unknown>[]> {
+    const windowed = input.createdAfter ? `and "created_at" >= ?` : "";
+    const bindings: unknown[] = [];
+    if (input.createdAfter) {
+      bindings.push(input.createdAfter);
+    }
+    bindings.push(input.limit);
+
+    return rawRows<Record<string, unknown>>(
+      await this.getRawSql().raw(
+        `select * from "${INVOICE_TABLE}"
+          where "deleted_at" is null
+            and "invoice_uuid" is not null
+            ${windowed}
+          order by "created_at" desc
+          limit ?`,
+        bindings,
+      ),
+    );
+  }
+
+  /**
    * Idempotently add an order to the invoicing queue.
    *
    * `order_id` is unique, so a second call for the same order is a no-op rather

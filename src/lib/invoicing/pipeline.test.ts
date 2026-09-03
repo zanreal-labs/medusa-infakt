@@ -63,7 +63,11 @@ const harness = (config?: {
     createInvoiceAsync: vi
       .fn()
       .mockResolvedValue({ invoiceTaskReferenceNumber: "ref-1", processingCode: 100 }),
-    getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", status: "paid", uuid: "u-1" }),
+    // `paidDate` is what the read-back reads; `status` rides along only to prove
+    // nothing depends on it any more.
+    getInvoice: vi
+      .fn()
+      .mockResolvedValue({ number: "1/07/2026", paidDate: "2026-09-02", status: "paid", uuid: "u-1" }),
     getInvoiceTaskStatus: vi
       .fn()
       .mockResolvedValue({ done: true, failed: false, invoiceUuid: "u-1", processingCode: 201 }),
@@ -1042,6 +1046,70 @@ describe("processInvoiceRow: confirming the paid marking", () => {
     expect(client.markPaid).toHaveBeenCalledTimes(1);
     expect(target.paid_marked_at).toBeInstanceOf(Date);
     expect(target.paid_confirmed_at).toBeInstanceOf(Date);
+    // inFakt's own paid date is recorded, and the row is stamped as checked so
+    // the settlement reconciliation does not re-read what this run just read.
+    expect(target.settled_at).toEqual(new Date("2026-09-02T00:00:00.000Z"));
+    expect(target.settlement_checked_at).toBeInstanceOf(Date);
+    expect(target.settlement_drift).toBeNull();
+    expect(target.status).toBe("done");
+  });
+
+  /**
+   * The defect this whole ticket exists for, pinned in both directions.
+   *
+   * Production invoice 2/09/2026: our marking survived as `paid_date` while
+   * `status` was flipped to "sent" three seconds later by our own Allegro
+   * attachment fetching the PDF. And invoice 9/08/2026, the other way round:
+   * `status: "paid"` on a document with no `paid_date` and `paid_price: 0`.
+   */
+  it("confirms on the paid date even after another actor overwrote the status", async () => {
+    const { deps } = harness({
+      client: {
+        getInvoice: vi
+          .fn()
+          .mockResolvedValue({ number: "1/07/2026", paidDate: "2026-09-02", status: "sent" }),
+      },
+    });
+    const target = row();
+
+    await processInvoiceRow(target, deps);
+
+    expect(target.paid_confirmed_at).toBeInstanceOf(Date);
+    expect(target.settled_at).toEqual(new Date("2026-09-02T00:00:00.000Z"));
+    expect(target.status).toBe("done");
+  });
+
+  it("does not confirm on a paid status with no paid date behind it", async () => {
+    const { deps } = harness({
+      client: {
+        getInvoice: vi
+          .fn()
+          .mockResolvedValue({ number: "1/07/2026", paidPrice: 0, status: "paid" }),
+      },
+    });
+    const target = row();
+
+    await processInvoiceRow(target, deps);
+
+    expect(target.paid_confirmed_at).toBeUndefined();
+    expect(target.settled_at).toBeUndefined();
+    // Left unstamped on purpose: the settlement reconciliation should pick this
+    // row up at the first opportunity, not in six hours.
+    expect(target.settlement_checked_at).toBeUndefined();
+    expect(target.status).toBe("done");
+  });
+
+  it("treats a paid date that is not a calendar date as no confirmation at all", async () => {
+    const { deps } = harness({
+      client: {
+        getInvoice: vi.fn().mockResolvedValue({ number: "1/07/2026", paidDate: "wkrótce" }),
+      },
+    });
+    const target = row();
+
+    await processInvoiceRow(target, deps);
+
+    expect(target.paid_confirmed_at).toBeUndefined();
     expect(target.status).toBe("done");
   });
 
@@ -1099,7 +1167,9 @@ describe("processInvoiceRow: confirming the paid marking", () => {
     expect(target.paid_confirmed_at).toBeUndefined();
     // Past the window the row is not even re-marked - it just completes, loudly.
     expect(deps.client.markPaid).not.toHaveBeenCalled();
-    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("never read back as paid"));
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("read back with no paid date"),
+    );
   });
 
   it("still completes the issuance when the mark-paid call itself throws", async () => {

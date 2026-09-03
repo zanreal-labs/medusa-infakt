@@ -109,21 +109,71 @@ const InfaktInvoice = model
      */
     paid_marked_at: model.dateTime().nullable(),
     /**
-     * When a read-back of the invoice showed inFakt's `status` as "paid".
+     * When a read-back of the invoice showed inFakt carrying a `paid_date`.
      *
-     * The marking endpoint is asynchronous and the status it writes is a single
-     * last-write-wins enum that any later action can overwrite, so having called
-     * it is not evidence that it took - only reading it back is. Once this is
-     * set the payment is never re-checked and never re-marked: a human later
-     * downloading the PDF flips the inFakt status to "printed", and that must not
-     * be read as a payment coming undone.
+     * The marking endpoint is asynchronous, so having called it is not evidence
+     * that it took - only reading it back is. What is read back is `paid_date`
+     * and never `status`: the status is a single last-write-wins enum that any
+     * later action overwrites (a PDF download alone flips it to "printed"), so a
+     * confirmation taken from it measures who touched the document last. Once
+     * this is set the payment is never re-checked and never re-marked.
      *
      * Null against a non-null `paid_marked_at` is the visible defect state: the
-     * invoice is issued but inFakt still shows it awaiting payment.
+     * invoice is issued but inFakt still shows it awaiting payment. That is the
+     * row the settlement reconciliation goes looking for.
      */
     paid_confirmed_at: model.dateTime().nullable(),
     /** The Medusa order. Unique - one pipeline per order, ever. */
     order_id: model.text().unique(),
+    /**
+     * inFakt's own `paid_date` for this invoice, once a read has seen one.
+     *
+     * The settlement ledger's anchor, and a different fact from
+     * `paid_confirmed_at`: that one says "our marking was seen to take", this one
+     * says "inFakt has the document settled, on this day". `paid_date` is written
+     * by the paid endpoint and survives every later action on the document, which
+     * is exactly what `status` does not do - so this is the only column here that
+     * can be trusted a week after the invoice was issued.
+     *
+     * Null means "not settled in inFakt as far as we last looked", never "not
+     * checked" - `settlement_checked_at` is what says whether anyone looked.
+     */
+    settled_at: model.dateTime().nullable(),
+    /**
+     * When the settlement reconciliation last read this invoice from inFakt.
+     *
+     * Its own column rather than a run-level timestamp because the question an
+     * operator asks is per invoice ("is THIS order's payment recorded?"), and
+     * because it is what bounds the reconciliation's API cost: a row checked
+     * recently is not checked again this hour.
+     *
+     * Null on every row that predates the reconciliation, and on every row it has
+     * not reached yet. That is also the metric worth alerting on - a
+     * reconciliation that has stopped running looks exactly like a settled estate
+     * unless someone watches the AGE of this column.
+     */
+    settlement_checked_at: model.dateTime().nullable(),
+    /**
+     * How Medusa's payment state and inFakt's settlement state disagree, as a
+     * short code, or null when they agree. Written by the reconciliation only.
+     *
+     * Text rather than an enum on purpose: these are diagnostic codes, the set
+     * will grow as cases are found in the wild, and a check constraint would mean
+     * a migration - and a deploy ordering problem - for every one of them. The
+     * codes themselves are defined and documented in
+     * `src/lib/invoicing/settlement.ts`.
+     */
+    settlement_drift: model.text().nullable(),
+    /**
+     * inFakt's `paid_price` in minor units at the last check.
+     *
+     * A RECORD, never a basis for a decision - invoice 9/08/2026 carries
+     * `status: "paid"` with `paid_price: 0`, so anything derived from this number
+     * would be wrong about a fully settled document. It is stored so an operator
+     * chasing a discrepancy can see what inFakt actually reported without opening
+     * the panel.
+     */
+    settlement_paid_minor: model.bigNumber().nullable(),
     /**
      * The VAT regime this invoice was issued under, frozen at build time for the
      * same reason `ksef_required` is: a later config change - enabling OSS,
@@ -180,6 +230,12 @@ const InfaktInvoice = model
     { on: ["status", "next_attempt_at"] },
     // The admin UI's needs_review filter, and the operator's landing view.
     { on: ["status"] },
+    // The settlement reconciliation's only query: the rows nobody has looked at
+    // recently. Same reasoning as the worker's index - Postgres will seq-scan a
+    // small ledger whatever this says, and the index starts earning its keep on
+    // the store where the reconciliation would otherwise re-scan every invoice
+    // ever issued, once an hour, forever.
+    { on: ["settlement_checked_at"] },
   ]);
 
 export default InfaktInvoice;

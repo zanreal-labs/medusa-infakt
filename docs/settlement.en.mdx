@@ -1,0 +1,149 @@
+---
+title: Settlement reconciliation
+description: Does inFakt agree that these orders were paid - why paid_date is the only durable signal, the five drift codes, the ninety-day sliding window, and why nothing is fixed automatically.
+---
+
+Issuing an invoice and recording that it was paid are two different jobs on two
+different clocks. The first has a legal deadline; the second is bookkeeping that
+can be put right an hour later. This mechanism is the second one, and it runs
+entirely outside the [invoicing pipeline](./invoicing.en.mdx) - its own job, its
+own columns, its own event.
+
+That separation is not tidiness. An earlier version wedged settlement into the
+issuing pipeline as a retry loop, and it held issued, KSeF-filed invoices out of
+`done` for fifteen minutes at a time.
+
+## `paid_date` is the signal, and nothing else is
+
+inFakt's `status` is a single last-write-wins enum (`draft`, `sent`, `printed`,
+`paid`) that **any** later action on the document overwrites - including a plain
+PDF download, which is how inFakt records that the document left the system.
+
+> Production invoice `2/09/2026`: marked paid at 12:40:03. Three seconds later
+> our own Allegro attachment fetched the PDF and the status read `sent`. The
+> `paid_date` was intact.
+
+Read through `status`, that invoice reports as unpaid forever. Read through
+`paid_date` - written by the paid endpoint, and untouched by every later action -
+it reports as what it is.
+
+The amounts are no better. Invoice `9/08/2026` carries `status: "paid"` together
+with `paid_price: 0`. Both `paid_price` and `left_to_pay` are recorded as
+evidence and **neither is ever decisive**.
+
+## One direction only
+
+Medusa is the source of truth for payment; inFakt is downstream. The
+reconciliation reads both, records what it found, and writes payment state into
+neither. Propagating "somebody ticked paid in the inFakt panel" back into an
+order would make an accounting panel into a payment gateway.
+
+It also never fetches a PDF. That endpoint is what corrupts `status` in the first
+place, so a reconciliation that used it would damage the field whose
+unreliability it exists to work around.
+
+## The four columns
+
+| Column | Meaning |
+| --- | --- |
+| `settled_at` | inFakt's `paid_date`, as a timestamp. Null means "not settled as far as we last looked" |
+| `settlement_checked_at` | When this row was last read from inFakt. Null means nobody has looked |
+| `settlement_drift` | How the two systems disagree, or null when they agree |
+| `settlement_paid_minor` | inFakt's `paid_price`. Evidence only, never a basis for anything |
+
+All four are nullable, with no default and **no backfill**. On an existing store
+every row starts null, which reads as "not checked yet" - nothing is
+reinterpreted, and the reconciliation fills them in on its own schedule,
+oldest-unchecked first.
+
+## The five drift codes
+
+| Code | What it means | Fixable by a machine? |
+| --- | --- | --- |
+| `unsettled` | Medusa captured the whole total, inFakt has no `paid_date` | **The only candidate** |
+| `refunded_but_settled` | Money went back and inFakt still has it settled | No - report only |
+| `settled_without_capture` | inFakt has it settled, Medusa captured nothing | No - report only |
+| `amount_mismatch` | inFakt has it settled, Medusa captured part of the total | No - report only |
+| `unreadable` | The invoice or the order could not be read well enough to compare | No |
+
+`amount_mismatch` is derived from **captures**, never from inFakt's own
+`paid_price` - see invoice `9/08/2026` above.
+
+A refund against a settled invoice is reported and never undone. inFakt has no
+"un-mark", and the correct instrument is a corrective invoice, which this plugin
+does not issue on its own initiative.
+
+## Nothing is fixed automatically
+
+Not even `unsettled`. This version reads, compares and reports; the report names
+the rows a fix *would* touch (`auto_fixable`) so the blast radius can be judged
+before anything is armed.
+
+**Adopted invoices are reported and never fixed, whatever their code.** An
+adopted invoice existed before its ledger row did, its payment bookkeeping
+belongs to whoever issued it, and writing a paid date onto it is a change to
+somebody else's accounting record. On the estate this was designed against, 25 of
+30 rows are adopted - the refusal is most of the table, not an edge case.
+
+## When it runs
+
+- **On an event.** `payment.captured`, `payment.refunded` and `order.canceled`
+  each reconcile the one order they name, seconds after the event. A refund is
+  the only way a settled invoice becomes wrong after the fact, and nothing else
+  in this plugin notices one.
+- **Hourly, at `17 * * * *`** (`INFAKT_SETTLEMENT_CRON`), as the backstop - for a
+  marking inFakt accepted and then lost, a payment settled by hand in the panel,
+  an event that was never delivered, and every row created before this mechanism
+  existed.
+
+A row that settles and agrees is **never read again**: `paid_date` does not come
+undone. A row that disagrees is re-read at most every 6 hours. That is what keeps
+the cost in the tens of requests a day rather than the hundreds.
+
+The job takes no invoicing claim. It shares no columns with the issuing state
+machine, so it cannot park an invoice, burn a retry budget, or hold a lock while
+a legal document waits behind it.
+
+## The ninety-day window
+
+The backstop looks back 90 days by default. An invoice whose settlement never
+reconciled is an operational problem for as long as it takes somebody to notice -
+weeks, not months - and an unbounded window means re-reading the store's entire
+invoice history, forever, to find nothing.
+
+A full pass is available on demand, which is the right shape for it: rare, asked
+for by name, and watched.
+
+## The report
+
+```http
+GET  /admin/infakt/settlement?days=90&full=true
+POST /admin/infakt/settlement  { days?, full?, order_ids? }
+```
+
+`GET` reads the ledger. It calls nothing external, costs one query, and is safe
+to poll or leave open in a tab.
+
+`POST` **re-reads inFakt** for the rows in scope and updates the same four
+columns, then answers with the refreshed report. It is a refresh, not an action:
+it never marks an invoice paid and never touches the issuing state machine.
+`apply: true` is refused with a 400 rather than ignored - auto-fixing does not
+exist, and a caller who asked for it must not be left believing a discrepancy was
+corrected.
+
+Unlike the invoicing routes, neither method consults the pause switch: reading a
+settlement report issues nothing, and a store reconciling its books is very
+likely to have invoicing paused.
+
+## What to watch
+
+`GET /admin/infakt` carries a `settlement` block alongside the status counts, at
+no extra query:
+
+| Field | Why it matters |
+| --- | --- |
+| `drift.unsettled` | Invoices this plugin issued that inFakt does not have settled |
+| `auto_fixable` | The subset a future fix would touch: `unsettled`, not adopted |
+| `adopted_drift` | Drift on adopted invoices - report only, always |
+| `never_checked` | Invoiced rows nobody has reconciled yet |
+| `oldest_checked_age_seconds` | **The one to alert on.** A stopped reconciler looks exactly like a settled estate unless the age of the check is measured |

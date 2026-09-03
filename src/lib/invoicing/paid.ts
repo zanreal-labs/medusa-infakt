@@ -92,6 +92,43 @@ export function capturedMinorUnits(order: PaidGateOrder): number {
 }
 
 /**
+ * Sum refunds across an order's payment collections, in integer minor units.
+ *
+ * A companion to `capturedMinorUnits`, not a variant of it: that function nets
+ * refunds off captures and answers "how much money is on the books", which is
+ * the only question the invoicing gate asks. The settlement reconciliation asks
+ * a different one - "did any of it come BACK?" - because an invoice inFakt has
+ * settled against an order that was refunded is a discrepancy a human has to
+ * resolve, and a net figure cannot tell a partial refund apart from a partial
+ * capture.
+ *
+ * Walks the same structures with the same defaults, and skips the same canceled
+ * collections and payments, so the two figures always describe the same set of
+ * payments. An unreadable refund counts as zero, which - here - is the reading
+ * that raises no alarm.
+ */
+export function refundedMinorUnits(order: PaidGateOrder): number {
+  let refunded = 0;
+  for (const collection of order.payment_collections ?? []) {
+    if (collection.status === "canceled" || collection.status === "failed") {
+      continue;
+    }
+    const aggregate = bigNumberToMinorUnits(collection.captured_amount);
+    if (aggregate !== null) {
+      refunded += bigNumberToMinorUnits(collection.refunded_amount) ?? 0;
+      continue;
+    }
+    for (const payment of collection.payments ?? []) {
+      if (payment.canceled_at) {
+        continue;
+      }
+      refunded += bigNumberToMinorUnits(payment.refunded_amount) ?? 0;
+    }
+  }
+  return refunded;
+}
+
+/**
  * Has the buyer paid the whole order?
  *
  * A zero or non-positive total counts as paid rather than deferring forever: a

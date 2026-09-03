@@ -121,8 +121,17 @@ export interface InvoiceStateRow {
   event_emitted_at?: Date | string | null;
   /** When the pipeline FIRST asked inFakt to mark the invoice paid. Never rewritten. */
   paid_marked_at?: Date | string | null;
-  /** When a read-back of the invoice showed `status: "paid"`. Terminal. */
+  /** When a read-back of the invoice showed inFakt carrying a `paid_date`. Terminal. */
   paid_confirmed_at?: Date | string | null;
+  /**
+   * inFakt's own `paid_date`, once a read has seen one. Written by the issuing
+   * pipeline's read-back and by the settlement reconciliation, and read by
+   * neither `nextStep` nor `classifyOutcome` - settlement never decides where an
+   * invoice goes next.
+   */
+  settled_at?: Date | string | null;
+  settlement_checked_at?: Date | string | null;
+  settlement_drift?: string | null;
   attempts: number;
   /** Earliest time the worker may pick the row up again. */
   next_attempt_at?: Date | string | null;

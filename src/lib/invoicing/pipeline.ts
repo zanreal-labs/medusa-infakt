@@ -12,6 +12,7 @@ import { toMinorUnits, warsawDate } from "./money";
 import type { MedusaOrderLike } from "./order-mapper";
 import { toInvoiceBuyerInput, toInvoiceOrderInput } from "./order-mapper";
 import { evaluatePaidGate } from "./paid";
+import { parseSettledAt } from "./settlement";
 import type { VatRegime } from "./regime";
 import { MossRateCache, resolveOrderRegime } from "./resolve-regime";
 import type { EuB2cSale } from "./threshold";
@@ -681,9 +682,20 @@ async function emitIssued(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
  * leaves the invoice showing as awaiting payment with nobody the wiser. That is
  * what this step exists to stop.
  *
- * `paid_price` and `left_to_pay` are NOT the signal - a fully paid invoice can
- * report a zero paid price and a non-zero balance. `status === "paid"` is the
- * only authoritative fact, and it is what is read here.
+ * ## What is read back, and why it is not `status`
+ *
+ * `paid_date` - the day inFakt has the document settled on - and nothing else.
+ * It is written by the paid endpoint and SURVIVES every later action on the
+ * document, which is precisely what `status` does not do. Production invoice
+ * 2/09/2026 is the proof: marked at 12:40:03, `paid_date` intact, `status`
+ * flipped to `sent` three seconds later by our own Allegro attachment fetching
+ * the PDF. A read-back against `status` measures who touched the document last,
+ * not whether the marking took, and reported perfectly good invoices as
+ * unconfirmed.
+ *
+ * `paid_price` and `left_to_pay` are not the signal either, in the other
+ * direction: invoice 9/08/2026 carries `status: "paid"` together with
+ * `paid_price: 0`. Neither amount is read here.
  *
  * ## Why it does not re-mark
  *
@@ -694,10 +706,11 @@ async function emitIssued(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
  * achieved was holding an issued, KSeF-filed invoice out of `done`.
  *
  * So the marking is sent once and read back once, for evidence. If the evidence
- * is inconclusive the row completes anyway and an operator is told. Guaranteed
- * settlement bookkeeping needs its own reconciliation against `paid_date`, which
- * unlike `status` survives a later action on the document - not a retry loop
- * wedged into the issuing pipeline.
+ * is inconclusive the row completes anyway, an operator is told, and the
+ * settlement reconciliation (`src/lib/invoicing/settle.ts`) picks the row up on
+ * its own schedule - a row that completes without a `settled_at` is exactly what
+ * that mechanism exists to find. Not a retry loop wedged into the issuing
+ * pipeline.
  *
  * `allow_correction` is deliberately NOT sent. It permits inFakt to book an
  * accounting correction, which is the account owner's decision and not this
@@ -733,19 +746,30 @@ async function confirmPaid(row: InvoiceRow, deps: PipelineDeps): Promise<void> {
     await patch(row, deps, { paid_marked_at: new Date() });
   }
 
-  let confirmed = false;
+  let settledAt: Date | null = null;
   try {
     await (deps.sleep ?? defaultSleep)(PAID_SETTLE_MS);
     const invoice = await deps.client.getInvoice(uuid);
-    confirmed = invoice.status === "paid";
+    settledAt = parseSettledAt(invoice.paidDate);
   } catch (error) {
     deps.logger.warn(
-      `[medusa-infakt] could not read back the paid status of invoice ${uuid} (order ${row.order_id}): ${describeError(error)}`,
+      `[medusa-infakt] could not read back the paid date of invoice ${uuid} (order ${row.order_id}): ${describeError(error)}`,
     );
   }
 
-  if (confirmed) {
-    await patch(row, deps, { paid_confirmed_at: new Date() });
+  if (settledAt) {
+    // Three columns, three different facts: our marking was seen to take
+    // (`paid_confirmed_at`), inFakt has the document settled on this day
+    // (`settled_at`), and somebody has looked (`settlement_checked_at`). The
+    // last one is what keeps the reconciliation from re-reading, minutes later,
+    // an invoice this run just read.
+    const now = new Date();
+    await patch(row, deps, {
+      paid_confirmed_at: now,
+      settled_at: settledAt,
+      settlement_checked_at: now,
+      settlement_drift: null,
+    });
     return;
   }
   // Inconclusive, and that is the end of it. Say nothing here: the row is about
@@ -765,7 +789,7 @@ function warnUnconfirmedPayment(row: InvoiceRow, deps: PipelineDeps): void {
     return;
   }
   deps.logger.warn(
-    `[medusa-infakt] invoice ${row.invoice_uuid} (order ${row.order_id}) was marked paid in inFakt but never read back as paid - inFakt still shows it awaiting payment; settle it there by hand`,
+    `[medusa-infakt] invoice ${row.invoice_uuid} (order ${row.order_id}) was marked paid in inFakt but read back with no paid date - inFakt still shows it awaiting payment. The settlement reconciliation will re-check it; settle it in inFakt by hand if it stays that way`,
   );
 }
 

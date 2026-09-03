@@ -81,7 +81,7 @@ The next step is derived purely from which columns are still null:
   invoice_number null?                          -> fetch-invoice-number
   ksef_required and no ksef_number?             -> ksef_sent_at set ? poll-ksef : send-to-ksef
   emitEvent and no event_emitted_at?            -> emit-event
-  paid_confirmed_at null, within the window?    -> confirm-paid
+  never marked, not adopted, not confirmed?     -> confirm-paid
   otherwise                                     -> complete
 ```
 
@@ -103,13 +103,26 @@ assumed:
    `allow_correction` is never sent - booking an accounting correction is the
    account owner's decision).
 2. `paid_marked_at` is written once, on the first attempt, even if the call
-   failed. It starts the confirmation budget and is never rewritten.
-3. The invoice is read back. `status === "paid"` - not `paid_price` or
-   `left_to_pay`, which can both look wrong on a fully paid invoice - sets
-   `paid_confirmed_at`.
-4. Unconfirmed, the row defers and marks again on the next tick, for up to 15
-   minutes from `paid_marked_at`. Then it completes anyway, with a warning naming
-   the invoice uuid and the order, and the admin widget shows "not confirmed".
+   failed. It is what stops the step ever running twice, and is never rewritten.
+3. The invoice is read back, and what is read is **`paid_date`**. It is written
+   by the paid endpoint and survives every later action on the document, which is
+   exactly what `status` does not do. `paid_date` sets `paid_confirmed_at` and
+   `settled_at`.
+4. Unconfirmed, the row **completes anyway**, with a warning naming the invoice
+   uuid and the order, and the admin widget shows "not confirmed". There is no
+   retry loop: whatever overwrote the marking the first time overwrites it again,
+   so re-marking could only spend an issued, KSeF-filed invoice's completion on a
+   signal that was never going to settle. Settlement is picked up afterwards by
+   the [settlement reconciliation](./settlement.en.mdx), on its own
+   schedule.
+
+`status` is deliberately not the signal. Production invoice `2/09/2026` was
+marked at 12:40:03 and read back three seconds later as `status: "sent"` - our
+own Allegro attachment had downloaded the PDF, and a PDF download flips the
+status. Its `paid_date` was intact. Read through `status`, a perfectly settled
+invoice reports as unconfirmed; read through `paid_date`, it reports as what it
+is. `paid_price` is no better in the other direction: invoice `9/08/2026` carries
+`status: "paid"` together with `paid_price: 0`.
 
 Once `paid_confirmed_at` is set the payment is never re-checked. A human
 downloading the PDF flips the inFakt status to "printed", and that must not read
@@ -197,7 +210,9 @@ validation dump can be kilobytes long.
 | Riding KSeF to a terminal state inside one run | 5 s, doubling to a 30 s cap, for up to 150 s shared by the whole run |
 | Waiting for buyer data that has not arrived, from `created_at` | 60 minutes |
 | Re-check while the order is not yet fully paid | 30 minutes |
-| Confirming the paid marking took, measured from `paid_marked_at` | 15 minutes |
+| Confirming the paid marking took | One read-back, in the same run. Never retried - see above |
+| Settlement reconciliation | `17 * * * *`, override with `INFAKT_SETTLEMENT_CRON`. A separate job on separate columns |
+| Re-reading an invoice whose settlement still disagrees | 6 hours |
 | First retry after a failure | 10 minutes, doubling to a 6 hour cap |
 
 Nothing routine waits for the cron. The payment subscriber issues the invoice,

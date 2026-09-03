@@ -120,6 +120,7 @@ poświadczenia do bazy, i podaje w komunikacie nazwę brakującej opcji.
 | Zmienna | Domyślnie | Do czego służy |
 | --- | --- | --- |
 | `INFAKT_WORKER_CRON` | `*/5 * * * *` | Harmonogram workera. Zmienna, a nie opcja, bo Medusa czyta `config.schedule` zadania, zanim istnieje kontener. To interwał siatki bezpieczeństwa, a nie czas oczekiwania kupującego: subscriber `payment.captured` wystawia fakturę natychmiast. |
+| `INFAKT_SETTLEMENT_CRON` | `17 * * * *` | Harmonogram [uzgadniania rozliczeń](./settlement.pl.mdx). Osobne zadanie na osobnych kolumnach; nigdy nie bierze blokady fakturowania. |
 | `INFAKT_INVOICING_DISABLED` | nieustawiona | Twarde wyłączenie. Opis wyżej. |
 
 ## API panelu
@@ -204,3 +205,11 @@ sprawdzeniem `apiKey` przed czymkolwiek innym.
 
 Przejmowanie faktur już istniejących w inFakcie. Domyślnie przebieg próbny.
 Zobacz [Uzgadnianie i przejmowanie faktur](./reconciliation.pl.mdx).
+
+### `GET` i `POST /admin/infakt/settlement`
+
+Czy inFakt zgadza się, że te zamówienia zostały opłacone? `GET` raportuje z
+rejestru i nie woła niczego na zewnątrz; `POST` czyta inFakt na nowo dla wierszy w
+zakresie i odpowiada odświeżonym raportem. Żadna z metod nie oznacza faktury jako
+zapłaconej - `apply: true` kończy się błędem 400. Zobacz
+[Uzgadnianie rozliczeń](./settlement.pl.mdx).

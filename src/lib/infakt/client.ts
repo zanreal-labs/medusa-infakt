@@ -57,6 +57,10 @@ interface InvoiceResponse {
   gross_price?: number | null;
   currency?: string | null;
   invoice_date?: string | null;
+  /** The durable settlement signal; see `InfaktInvoice.paidDate`. */
+  paid_date?: string | null;
+  paid_price?: number | null;
+  left_to_pay?: number | null;
   client_tax_code?: string | null;
   client_email?: string | null;
   client_first_name?: string | null;
@@ -182,7 +186,13 @@ const mapInvoice = (raw: InvoiceResponse): InfaktInvoice => ({
   currency: raw.currency ?? undefined,
   grossPrice: raw.gross_price ?? undefined,
   invoiceDate: raw.invoice_date ?? undefined,
+  leftToPay: raw.left_to_pay ?? undefined,
   number: raw.number ?? undefined,
+  // Mapped for the settlement reconciliation, which decides on `paid_date`
+  // alone. The two amounts ride along as evidence and are never decisive - see
+  // the docblocks on `InfaktInvoice`.
+  paidDate: raw.paid_date ?? undefined,
+  paidPrice: raw.paid_price ?? undefined,
   services: raw.services
     ? raw.services.map((service) => ({
         grossPrice: service.gross_price ?? undefined,
