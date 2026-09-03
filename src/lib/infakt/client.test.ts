@@ -163,10 +163,36 @@ describe("InfaktClient", () => {
       currency: "PLN",
       grossPrice: 615_000,
       invoiceDate: "2026-07-15",
+      leftToPay: undefined,
       number: "1/07/2026",
+      paidDate: undefined,
+      paidPrice: undefined,
       services: [{ grossPrice: 615_000, name: "Usluga", quantity: 2 }],
       status: "paid",
       uuid: "u-1",
+    });
+  });
+
+  it("maps the settlement fields, which the status cannot substitute for", async () => {
+    // Invoice 2/09/2026, as the API actually returned it: our marking survived
+    // as `paid_date` while a PDF download had already flipped `status` to "sent".
+    stubFetch(() =>
+      apiJson(200, {
+        left_to_pay: 0,
+        number: "2/09/2026",
+        paid_date: "2026-09-02",
+        paid_price: 615_000,
+        status: "sent",
+        uuid: "u-1",
+      }),
+    );
+    const client = new InfaktClient({ apiKey: "KEY" });
+    const invoice = await client.getInvoice("u-1");
+    expect(invoice).toMatchObject({
+      leftToPay: 0,
+      paidDate: "2026-09-02",
+      paidPrice: 615_000,
+      status: "sent",
     });
   });
 

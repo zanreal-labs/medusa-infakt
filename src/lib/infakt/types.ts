@@ -208,6 +208,26 @@ export interface InfaktInvoice {
   currency?: string;
   /** YYYY-MM-DD, as issued. */
   invoiceDate?: string;
+  /**
+   * YYYY-MM-DD, the day inFakt has the document settled on. Absent while it is
+   * unsettled.
+   *
+   * The DURABLE settlement signal, and the reason this field is mapped at all.
+   * `status` is a single last-write-wins enum that any later action on the
+   * document overwrites - a PDF download resets it to "printed" - whereas
+   * `paid_date` is written by the paid endpoint and survives every later touch.
+   * Production invoice 2/09/2026 is the case: marked paid at 12:40:03, read back
+   * three seconds later as `status: "sent"`, with `paid_date` intact.
+   */
+  paidDate?: string;
+  /**
+   * Integer grosze inFakt believes has been paid. RECORDED, never decisive:
+   * invoice 9/08/2026 carries `status: "paid"` and `paid_price: 0` at the same
+   * time, so a settlement decision taken on this number would be wrong.
+   */
+  paidPrice?: number;
+  /** Integer grosze inFakt still shows outstanding. As unreliable as `paidPrice`. */
+  leftToPay?: number;
   clientTaxCode?: string;
   clientEmail?: string;
   clientFirstName?: string;
