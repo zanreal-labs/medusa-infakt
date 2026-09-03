@@ -118,6 +118,7 @@ database, with a message naming the option.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `INFAKT_WORKER_CRON` | `*/5 * * * *` | Worker schedule. An env var rather than an option because Medusa reads a job's `config.schedule` before the container exists. This is the safety net's interval, not the time a buyer waits: the `payment.captured` subscriber issues the invoice immediately. |
+| `INFAKT_SETTLEMENT_CRON` | `17 * * * *` | [Settlement reconciliation](./settlement.en.mdx) schedule. A separate job on separate columns; it never takes the invoicing claim. |
 | `INFAKT_INVOICING_DISABLED` | unset | Hard force-off. See above. |
 
 ## Admin API
@@ -200,3 +201,11 @@ inFakt. Guarded on `apiKey` being configured before anything else.
 
 Adoption of invoices that already exist in inFakt. Dry run by default. See
 [Reconciliation and adoption](./reconciliation.en.mdx).
+
+### `GET` and `POST /admin/infakt/settlement`
+
+Does inFakt agree that these orders were paid? `GET` reports from the ledger and
+calls nothing external; `POST` re-reads inFakt for the rows in scope and answers
+with the refreshed report. Neither ever marks an invoice paid - `apply: true` is
+refused with a 400. See
+[Settlement reconciliation](./settlement.en.mdx).

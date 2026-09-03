@@ -29,6 +29,7 @@ follows from that.
 - [The total-match guard](#the-total-match-guard)
 - [Orders backfilled from a legacy system](#orders-backfilled-from-a-legacy-system)
 - [Adopting invoices that already exist in inFakt](#adopting-invoices-that-already-exist-in-infakt)
+- [Settlement: does inFakt agree the order was paid?](#settlement-does-infakt-agree-the-order-was-paid)
 - [Where the buyer's NIP comes from](#where-the-buyers-nip-comes-from)
 - [KSeF](#ksef)
   - [The KSeF webhook](#the-ksef-webhook)
@@ -463,6 +464,7 @@ different day than it reads as.
 | Variable                    | Default       | Effect                                                                 |
 | --------------------------- | ------------- | ---------------------------------------------------------------------- |
 | `INFAKT_WORKER_CRON`        | `*/5 * * * *` | Cron schedule for the worker job. A reconciliation interval, not a latency budget: a paid order is invoiced immediately by the `payment.captured` subscriber, and this tick retries whatever that could not finish. |
+| `INFAKT_SETTLEMENT_CRON`    | `17 * * * *`  | Cron schedule for the settlement reconciliation - the read-only pass that compares inFakt's `paid_date` with what Medusa captured. A separate job on separate columns, which never takes the invoicing claim and never marks anything paid. |
 | `INFAKT_INVOICING_DISABLED` | unset         | `1`/`true`/`yes` force-disables invoicing, overriding everything else. |
 
 **Why the cron is not an option.** Medusa evaluates a scheduled job's `config.schedule`
@@ -742,6 +744,46 @@ date and number - so the reconciliation makes **no per-invoice detail call at al
 used to fetch `GET /invoices/{uuid}.json` for line positions; nothing reads those now.
 
 It is a read. The reconciliation calls nothing that creates, sends or files.
+
+## Settlement: does inFakt agree the order was paid?
+
+Issuing an invoice and recording that it was paid are two jobs on two clocks. The first
+has a legal deadline; the second is bookkeeping. They are kept apart - separate job,
+separate columns, separate events - because an earlier version wedged them together as a
+retry loop and held issued, KSeF-filed invoices out of `done` for fifteen minutes at a
+time.
+
+**`paid_date` is the signal, and nothing else is.** inFakt's `status` is a single
+last-write-wins enum that any later action overwrites, including a plain PDF download.
+Invoice `2/09/2026` was marked paid at 12:40:03 and read back three seconds later as
+`status: "sent"` - our own Allegro attachment had fetched the PDF - with its `paid_date`
+intact. The amounts are no better in the other direction: invoice `9/08/2026` carries
+`status: "paid"` together with `paid_price: 0`. Both amounts are recorded as evidence and
+neither is ever decisive.
+
+Four nullable columns carry the result, with no backfill: `settled_at` (inFakt's
+`paid_date`), `settlement_checked_at` (when anyone last looked), `settlement_drift` (how
+the two systems disagree, or null) and `settlement_paid_minor` (evidence only).
+
+| Drift code | Meaning |
+| --- | --- |
+| `unsettled` | Captured in full in Medusa, no `paid_date` in inFakt. The only code a fix could ever safely touch |
+| `refunded_but_settled` | Money went back, inFakt still has it settled. Report only |
+| `settled_without_capture` | inFakt has it settled, Medusa captured nothing. Report only |
+| `amount_mismatch` | inFakt has it settled, Medusa captured part of the total. Report only |
+| `unreadable` | The invoice or the order could not be read well enough to compare |
+
+**Nothing is fixed automatically in this version** - not even `unsettled`. The report
+names the rows a future fix *would* touch (`auto_fixable`) so the blast radius can be
+judged before anything is armed. **Adopted invoices are reported and never fixed**,
+whatever their code: their payment bookkeeping belongs to whoever issued them.
+
+It runs on `payment.captured`, `payment.refunded` and `order.canceled` for the one order
+each names, and hourly at `17 * * * *` as the backstop over a sliding ninety-day window
+(a full pass is available on demand). A row that settles and agrees is never read again;
+a row that disagrees is re-read at most every six hours. It takes no invoicing claim,
+never fetches a PDF, never marks anything paid, and never writes payment state back into
+Medusa.
 
 ## Where the buyer's NIP comes from
 
@@ -1085,12 +1127,13 @@ HMAC signature instead; see [The KSeF webhook](#the-ksef-webhook).
 
 | Route                        | Method    | Purpose                                                                 |
 | ---------------------------- | --------- | ----------------------------------------------------------------------- |
-| `/admin/infakt`              | GET       | Configuration, worker run state, per-status counts, crash-window count. |
+| `/admin/infakt`              | GET       | Configuration, worker run state, per-status counts, crash-window count, settlement drift. |
 | `/admin/infakt/invoices`     | GET       | The ledger. `?status=`, `?limit=`, `?offset=`.                          |
 | `/admin/infakt/invoices/:id` | POST      | `{ action: "retry" \| "adopt" \| "clear" \| "skip", ... }`.             |
 | `/admin/infakt/ksef-check`   | POST      | Re-verify the KSeF integration now.                                     |
 | `/admin/infakt/enqueue`      | POST      | `{ order_id }`. Queue an order the trigger missed.                      |
 | `/admin/infakt/reconcile`    | GET, POST | Adopt invoices that already exist in inFakt. Dry run unless asked otherwise. |
+| `/admin/infakt/settlement`   | GET, POST | Settlement drift against inFakt's `paid_date`. GET reads the ledger; POST re-reads inFakt. Never marks anything paid. |
 | `/admin/infakt/settings`     | GET, POST | The effective-enablement picture and every live override. See below.    |
 
 `GET /admin/infakt/settings` reports `settings` (the raw override, null where unset) and
