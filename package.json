@@ -1,6 +1,6 @@
 {
   "name": "@zanreal/medusa-infakt",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Medusa v2 plugin for Polish invoicing: issues inFakt invoices for paid orders and files them to KSeF, with a durable, crash-safe state machine and an operator surface for invoices that need review.",
   "keywords": [
     "e-invoicing",
@@ -10,6 +10,7 @@
     "medusa",
     "medusa-plugin",
     "medusa-plugin-integration",
+    "medusa-plugin-other",
     "medusa-v2",
     "plugin",
     "poland"
@@ -29,7 +30,8 @@
     "provenance": true
   },
   "files": [
-    ".medusa/server"
+    ".medusa/server",
+    "CHANGELOG.md"
   ],
   "exports": {
     "./package.json": "./package.json",

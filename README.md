@@ -1300,8 +1300,10 @@ maintainer's call.
 
 To cut a release:
 
-1. Bump `version` in `package.json` on `main`.
-2. Publish a GitHub Release whose tag is `v<version>`, exactly.
+1. Move the `## [Unreleased]` entries in [CHANGELOG.md](./CHANGELOG.md) under a
+   heading for the new version, dated.
+2. Bump `version` in `package.json` on `main`.
+3. Publish a GitHub Release whose tag is `v<version>`, exactly.
 
 The workflow refuses to publish when the tag disagrees with `package.json`, or
 when that version is already on the registry. A release marked as a prerelease
