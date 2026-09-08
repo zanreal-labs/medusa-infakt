@@ -12,8 +12,9 @@ which document gets issued, when it gets filed, or what an operator has to do ab
 
 ## [Unreleased]
 
-Everything below is on `main` and has not been published. Install it as a pinned git
-dependency if you need it before the next release.
+Nothing yet.
+
+## [1.0.0] - 2026-09-08
 
 ### Added
 
@@ -69,5 +70,6 @@ First public release. MIT, published from CI with npm provenance.
 - **Order timeline entry** recording issuance.
 - **Admin UI in English and Polish.**
 
-[Unreleased]: https://github.com/zanreal-labs/medusa-infakt/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/zanreal-labs/medusa-infakt/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v1.0.0
 [0.1.0]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v0.1.0
