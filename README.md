@@ -82,7 +82,7 @@ obligation applies to your business, and that your invoices are correct, remains
 
 ## Install
 
-`@zanreal/medusa-infakt` is on npm as `0.1.0`:
+`@zanreal/medusa-infakt` is on npm:
 
 ```bash
 npm install @zanreal/medusa-infakt

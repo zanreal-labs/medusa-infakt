@@ -14,6 +14,14 @@ which document gets issued, when it gets filed, or what an operator has to do ab
 
 Nothing yet.
 
+## [1.0.1] - 2026-09-08
+
+### Fixed
+
+- The install line no longer pins a version number. It named `0.1.0` explicitly,
+  so it went stale the moment a release shipped and contradicted the version npm
+  resolves. The `npm install` command below it was always version-less and correct.
+
 ## [1.0.0] - 2026-09-08
 
 ### Added
@@ -70,6 +78,7 @@ First public release. MIT, published from CI with npm provenance.
 - **Order timeline entry** recording issuance.
 - **Admin UI in English and Polish.**
 
-[Unreleased]: https://github.com/zanreal-labs/medusa-infakt/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/zanreal-labs/medusa-infakt/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v1.0.1
 [1.0.0]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v1.0.0
 [0.1.0]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v0.1.0
