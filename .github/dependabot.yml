@@ -13,11 +13,32 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
+      # Medusa ships every @medusajs package in lockstep, and the host app pins
+      # the same version. One of them bumped alone is a broken set, so they
+      # only ever move together - in practice, with the app.
+      medusa:
+        patterns:
+          - "@medusajs/*"
       dev-dependencies:
         dependency-type: "development"
+        exclude-patterns:
+          - "@medusajs/*"
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Admin extensions render inside the Medusa dashboard's i18n instance, so
+      # these stay on the majors @medusajs/dashboard itself depends on
+      # (react-i18next 13, i18next 23 as of 2.21.1). A newer major bundles a
+      # second instance and the widgets lose the host's translations.
+      - dependency-name: "react-i18next"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "i18next"
+        update-types: ["version-update:semver-major"]
+      # Types track the OLDEST supported Node (Medusa 2.19+: ^20.19), or code
+      # could compile against APIs that runtime does not have.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
