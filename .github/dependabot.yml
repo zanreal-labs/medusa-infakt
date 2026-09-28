@@ -39,6 +39,12 @@ updates:
       # could compile against APIs that runtime does not have.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # The admin toolchain follows Medusa: 2.21.1 builds admin extensions
+      # with Vite 7, and a second major in the plugin's own devDependencies
+      # would not change what the dashboard bundles with. Lift this when
+      # Medusa moves to Vite 8.
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
