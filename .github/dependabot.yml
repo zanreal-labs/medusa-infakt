@@ -45,6 +45,14 @@ updates:
       # Medusa moves to Vite 8.
       - dependency-name: "vite"
         update-types: ["version-update:semver-major"]
+      # Dependabot cannot resolve these majors against the Medusa toolchain
+      # (the 2026-09-28 run failed with HelperSubprocessFailed on vitest,
+      # eslint and vite), so every weekly run went red. Bump them by hand,
+      # together with the rest of the toolchain.
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
