@@ -12,13 +12,23 @@ which document gets issued, when it gets filed, or what an operator has to do ab
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [2.0.0] - 2026-11-22
+
 ### Changed
 
-- **Built and tested against Medusa 2.21.1** (was 2.18.0), with the admin toolchain Medusa 2.19
-  requires: Vite 7 and, where used, React Router 7. `react-i18next` and `i18next` deliberately stay
-  on the majors the Medusa dashboard itself ships (13 and 23): admin extensions share the host's
-  i18n instance, and a second major would give them one of their own. Install alongside Medusa
-  2.21.1; Node ^20.19 or ^22.12 is required from Medusa 2.19 on.
+- **BREAKING: requires Medusa 2.23.0.** Built and tested against Medusa 2.23.0 (was 2.18.0 in
+  1.0.1): the `@medusajs/*` peers pin 2.23.0 (`@medusajs/ui` 4.3.0), so npm will not install this
+  release next to an older Medusa - stay on 1.0.1 there. Medusa 2.23 requires Node.js 22.22 or
+  newer, and so does this package now.
+- **React 19 admin toolchain.** The admin widgets are built with React 19, Vite 8 and the i18n
+  majors the 2.23.0 dashboard ships (`react-i18next` 18, `i18next` 27); the `react-i18next` peer
+  is now `^18.0.1`. Admin extensions share the host's i18n instance, so these follow the
+  dashboard rather than moving on their own. Two widget call sites were adjusted to the stricter
+  i18next 27 `t()` typings; rendering is unchanged.
+- Dependency updates now come from Renovate, run weekly by the `zanek-ai` app from
+  `.github/workflows/renovate.yml`, instead of Dependabot.
 
 ## [1.0.1] - 2026-09-08
 
@@ -84,7 +94,8 @@ First public release. MIT, published from CI with npm provenance.
 - **Order timeline entry** recording issuance.
 - **Admin UI in English and Polish.**
 
-[Unreleased]: https://github.com/zanreal-labs/medusa-infakt/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/zanreal-labs/medusa-infakt/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/zanreal-labs/medusa-infakt/compare/v1.0.1...v2.0.0
 [1.0.1]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v1.0.1
 [1.0.0]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v1.0.0
 [0.1.0]: https://github.com/zanreal-labs/medusa-infakt/releases/tag/v0.1.0
