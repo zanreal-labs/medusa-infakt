@@ -131,7 +131,7 @@ const errorMessage = (error: unknown, fallback: string): string => {
 // suite) gets this identity-style default, which returns the given English
 // text exactly as the function did before it had any i18n awareness.
 const identityT: TFunction = ((_key: string, defaultValue?: string) =>
-  defaultValue ?? _key) as TFunction;
+  defaultValue ?? _key) as unknown as TFunction;
 
 export const describeKsef = (row: InfaktInvoiceRow, t: TFunction = identityT): string | null => {
   if (row.ksef_number) {

@@ -7,7 +7,7 @@ system.
 Full documentation, in English and Polish, is published at
 <https://zanreal.com/docs/oss/medusa-infakt> and authored in [`docs/`](./docs).
 
-Built against Medusa core `2.18.0`.
+Built against Medusa core `2.23.0`.
 
 The hard part of this integration is not the API calls. It is that **issuing an invoice
 cannot be undone.** inFakt's create endpoint has no idempotency key, so a retried

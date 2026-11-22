@@ -76,7 +76,7 @@ const InfaktOrderActivityWidget = ({ data }: { data: WidgetOrder }) => {
   }
 
   const entries = buildInvoiceTimeline(row, (key, defaultValue, options) =>
-    t(key, defaultValue, options),
+    t(key, defaultValue, options ?? {}),
   );
   if (entries.length === 0) {
     return null;
