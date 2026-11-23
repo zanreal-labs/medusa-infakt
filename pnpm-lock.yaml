@@ -64,7 +64,7 @@ importers:
         version: 9.39.5(jiti@2.7.0)
       i18next:
         specifier: ^27.1.1
-        version: 27.2.2(typescript@5.9.3)
+        version: 27.2.3(typescript@5.9.3)
       jiti:
         specifier: ^2.7.0
         version: 2.7.0
@@ -82,7 +82,7 @@ importers:
         version: 19.3.1(react@19.3.1)
       react-i18next:
         specifier: ^18.0.1
-        version: 18.0.3(@types/react@19.3.0)(i18next@27.2.2(typescript@5.9.3))(react@19.3.1)(typescript@5.9.3)
+        version: 18.0.3(@types/react@19.3.0)(i18next@27.2.3(typescript@5.9.3))(react@19.3.1)(typescript@5.9.3)
       ts-node:
         specifier: ^10.9.2
         version: 10.9.2(@swc/core@1.16.22(@swc/helpers@0.5.24))(@types/node@20.19.43)(typescript@5.9.3)
@@ -4200,8 +4200,8 @@ packages:
       typescript:
         optional: true
 
-  i18next@27.2.2:
-    resolution: {integrity: sha512-1/AJgz/bpE/YL6tqekQlZAzDhkmrUBbgU8+Xon/Lwv6c5WdYuyFZ9mb86OVfR2C2XujUDT7Rz23Ydaq4l981lA==}
+  i18next@27.2.3:
+    resolution: {integrity: sha512-14wcQLAu5Aykwk4scBGl8tosKYth4S2PQDcusbES/bUsQ7X7DbcPygMzCe298U/NcAvDpqr+CX6oygbQoyLBRA==}
     engines: {node: '>=22'}
     peerDependencies:
       typescript: ^5 || ^6 || ^7
@@ -10828,7 +10828,7 @@ snapshots:
     optionalDependencies:
       typescript: 5.9.3
 
-  i18next@27.2.2(typescript@5.9.3):
+  i18next@27.2.3(typescript@5.9.3):
     optionalDependencies:
       typescript: 5.9.3
 
@@ -11888,10 +11888,10 @@ snapshots:
       '@types/react': 19.3.0
       typescript: 5.9.3
 
-  react-i18next@18.0.3(@types/react@19.3.0)(i18next@27.2.2(typescript@5.9.3))(react@19.3.1)(typescript@5.9.3):
+  react-i18next@18.0.3(@types/react@19.3.0)(i18next@27.2.3(typescript@5.9.3))(react@19.3.1)(typescript@5.9.3):
     dependencies:
       html-parse-stringify: 4.0.1
-      i18next: 27.2.2(typescript@5.9.3)
+      i18next: 27.2.3(typescript@5.9.3)
       react: 19.3.1
     optionalDependencies:
       '@types/react': 19.3.0
